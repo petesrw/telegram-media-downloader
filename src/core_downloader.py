@@ -4,6 +4,7 @@ import sys
 import json
 import traceback
 from telethon import TelegramClient
+from telethon.utils import get_peer_id
 from telethon.tl.types import (
     InputMessagesFilterPhotos,
     InputMessagesFilterVideo,
@@ -22,6 +23,66 @@ from telethon.tl.types import (
 from database import save_task_db, load_active_tasks_db, remove_task_db, cache_media_list, mark_media_completed, get_completed_state_db
 from utils.file_utils import get_media_filename
 from utils.fast_telethon import fast_download_file, _atomic_finalize_sync
+from utils.app_logger import log_event, describe_download_error
+
+# Watchdog defaults (overridable in Settings). A download that produces no
+# progress for STALL_WARN seconds is reported as stalled; one that stays idle
+# for STALL_ABORT seconds is cancelled so it stops holding a concurrency slot.
+DEFAULT_STALL_WARN_SECONDS = 45
+DEFAULT_STALL_ABORT_SECONDS = 180
+STALL_POLL_SECONDS = 5.0
+
+def _fmt_bytes(size):
+    try:
+        size = float(size or 0)
+    except (TypeError, ValueError):
+        size = 0.0
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+def _swallow_task_result(task):
+    """Consume a background task's result so Python does not warn on GC."""
+    if not task.cancelled():
+        try:
+            task.exception()
+        except Exception:
+            pass
+
+async def _stall_watchdog(message_id, last_activity, stall_phase, warned, abort_reason,
+                          stop_event, download_task, warn_seconds, abort_seconds, stall_cb,
+                          poll_seconds=STALL_POLL_SECONDS):
+    """Report (and eventually cancel) a download that stopped making progress."""
+    while True:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        idle = time.time() - last_activity[0]
+        if warn_seconds and idle >= warn_seconds and not warned[0]:
+            warned[0] = True
+            phase = stall_phase[0]
+            log_event(
+                "WARNING",
+                f"message {message_id}: no progress for {int(idle)}s - {phase}",
+            )
+            if stall_cb:
+                try:
+                    stall_cb(message_id, int(idle), phase)
+                except Exception:
+                    pass
+
+        if abort_seconds and idle >= abort_seconds:
+            reason = f"Stalled - no progress for {int(idle)}s while {stall_phase[0]}"
+            abort_reason[0] = reason
+            log_event("ERROR", f"message {message_id}: {reason}")
+            if download_task is not None and not download_task.done():
+                download_task.cancel()
+            return
 
 def load_active_tasks():
     return load_active_tasks_db()
@@ -113,82 +174,236 @@ def parse_channel_input(channel_input):
             
     return s, None
 
-async def fetch_channel(client, channel_input):
+def _numeric_id_candidates(raw):
+    """Return the peer IDs worth trying for a purely numeric channel input.
+
+    Telegram keeps users (positive), basic groups (``-chat_id``) and
+    channels/supergroups (``-100channel_id``) in separate numeric ranges.
+    A pasted ID regularly loses its ``-100`` marker, and Telethon resolves a
+    bare negative number only as a *basic group*, so the other interpretation
+    has to be tried as well instead of giving up on the first miss.
     """
-    Fetch a channel by username or ID.
-    If input is pure digits or starts with -100, treat as integer ID.
+    raw = str(raw).strip()
+    negative = raw.startswith("-")
+    digits = raw[1:] if negative else raw
+    if not digits.isdigit():
+        return []
+
+    if negative:
+        candidates = [int(f"-{digits}")]
+        if not (digits.startswith("100") and len(digits) >= 12):
+            # A channel with the same raw ID is addressed as -100<id>
+            candidates.append(int(f"-100{digits}"))
+    else:
+        candidates = []
+        if len(digits) >= 8:
+            # A raw channel ID is addressed as -100<id>
+            candidates.append(int(f"-100{digits}"))
+        candidates.append(int(digits))
+
+    ordered = []
+    for value in candidates:
+        if value not in ordered:
+            ordered.append(value)
+    return ordered
+
+
+def _describe_peer_id(value):
+    """Human-readable label for a numeric peer ID, used in logs and errors."""
+    text = str(value)
+    if text.startswith("-100"):
+        return f"{text} (channel)"
+    if text.startswith("-"):
+        return f"{text} (basic group)"
+    return f"{text} (user or unmarked chat)"
+
+
+def _clean_rpc_detail(exc, limit=240):
+    """One-line, bounded rendering of a Telegram exception for the UI.
+
+    Telethon's server messages contain documentation snippets (and sometimes
+    literal ``\\n`` sequences), which are unreadable inside a QMessageBox.
+    """
+    text = " ".join(str(exc).replace("\\n", " ").split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return f"{type(exc).__name__}: {text}"
+
+
+def _inaccessible_reason(entity):
+    """Explain a placeholder entity Telegram returns instead of raising."""
+    kind = type(entity).__name__
+    if kind == "ChatEmpty":
+        return "Telegram returned an empty chat - the group no longer exists"
+    if kind == "ChatForbidden":
+        return "the account is not a participant of this group"
+    if kind == "ChannelForbidden":
+        return "the account is not a participant of this channel"
+    return None
+
+
+async def _follow_migration(client, entity):
+    """Follow ``Chat.migrated_to`` after a basic group became a supergroup.
+
+    The old chat ID keeps existing but no longer carries the messages, so
+    returning it unchanged makes every later call fail on a dead peer.
+    """
+    target = getattr(entity, "migrated_to", None)
+    if not target:
+        return entity
+    try:
+        upgraded = await client.get_entity(target)
+    except Exception as e:
+        log_event(
+            "WARNING",
+            f"group {getattr(entity, 'id', '?')} was upgraded, but the new "
+            f"supergroup could not be resolved: {describe_download_error(e)} ({e})",
+        )
+        return entity
+    log_event(
+        "INFO",
+        f"group {getattr(entity, 'id', '?')} was upgraded to supergroup "
+        f"{getattr(upgraded, 'id', '?')}; using the supergroup",
+    )
+    return upgraded
+
+
+async def _find_in_dialogs(client, candidate_ids):
+    """Scan active then archived dialogs for any of ``candidate_ids``.
+
+    Returns ``(entity, scanned)``. The entity is chosen in candidate priority
+    order, not in the order the scan happened to see the dialogs.
+    """
+    if not candidate_ids:
+        return None, 0
+
+    wanted = {int(value) for value in candidate_ids}
+    matches = {}
+    scanned = 0
+
+    for archived in (False, True):
+        if len(matches) == len(wanted):
+            break
+        async for dialog in client.iter_dialogs(archived=archived):
+            scanned += 1
+            entity = dialog.entity
+            try:
+                marked = get_peer_id(entity)
+                raw = get_peer_id(entity, add_mark=False)
+            except Exception:
+                continue
+            for value in (marked, raw):
+                if value in wanted and value not in matches:
+                    matches[value] = entity
+
+    for value in candidate_ids:
+        if value in matches:
+            print(f"DEBUG: Found {_describe_peer_id(value)} among {scanned} dialogs")
+            return matches[value], scanned
+    return None, scanned
+
+
+async def fetch_channel(client, channel_input):
+    """Fetch a channel by username or ID.
+
+    Numeric IDs are ambiguous (users, basic groups and channels all use plain
+    numbers), so every plausible interpretation is tried before failing.
     """
     original_input = str(channel_input).strip()
-    
-    # Pre-processing: aggressively normalize numeric channel IDs
-    if original_input.isdigit() or (original_input.startswith("-") and original_input[1:].isdigit()):
-        clean_id = original_input.replace("-", "")
-        
-        # If the user included the '100' prefix but forgot the negative sign: 1001553086349
-        if clean_id.startswith("100") and len(clean_id) >= 12:
-            channel_input = int(f"-{clean_id}")
-        # If the user provided the raw short ID: 1553086349
-        elif not original_input.startswith("-") and len(original_input) >= 8:
-            channel_input = int(f"-100{original_input}")
-        else:
-            # It was either correctly formatted like -1001553086349 or it's a small group ID
-            channel_input = int(original_input)
-            
-        # Update original_input so fallback search uses the perfectly normalized -100... format
-        original_input = str(channel_input)
-            
-    try:
-        # First attempt: direct get_entity
-        channel = await client.get_entity(channel_input)
-        title = getattr(channel, 'title', getattr(channel, 'username', getattr(channel, 'first_name', 'Unknown')))
-        print(f"DEBUG: Successfully resolved channel/entity: '{title}' (ID: {channel.id})")
-        return channel
-    except Exception as e:
-        # Second attempt: if direct lookup fails (common for private entities),
-        # try to find it in ALL dialogs of the current user.
-        print(f"Direct lookup for {original_input} failed ({e}). Searching through dialogs... this may take a moment.")
-        active_count = 0
-        archived_count = 0
+    candidate_ids = _numeric_id_candidates(original_input)
+    attempts = candidate_ids or [original_input]
+
+    errors = []
+    for candidate in attempts:
         try:
-            # Check Active Dialogs
-            async for dialog in client.iter_dialogs():
-                active_count += 1
-                d_id = str(dialog.id)
-                o_id = str(original_input)
-                if d_id == o_id or d_id.replace("-100", "", 1) == o_id.replace("-100", "", 1):
-                    print(f"Found entity in active dialogs (checked {active_count}): {dialog.title}")
-                    return dialog.entity
-                    
-            # Check Archived Dialogs
-            print(f"Not in active dialogs (checked {active_count}). Searching archived dialogs...")
-            async for dialog in client.iter_dialogs(archived=True):
-                archived_count += 1
-                d_id = str(dialog.id)
-                o_id = str(original_input)
-                if d_id == o_id or d_id.replace("-100", "", 1) == o_id.replace("-100", "", 1):
-                    print(f"Found entity in archived dialogs (checked {archived_count}): {dialog.title}")
-                    return dialog.entity
-                    
-            print(f"Channel {original_input} was completely missing from all {active_count} active and {archived_count} archived chats.")
+            entity = await client.get_entity(candidate)
+        except Exception as e:
+            errors.append((candidate, e))
+            print(f"DEBUG: get_entity({_describe_peer_id(candidate)}) failed: {type(e).__name__}: {e}")
+            continue
+
+        reason = _inaccessible_reason(entity)
+        if reason:
+            errors.append((candidate, RuntimeError(reason)))
+            print(f"DEBUG: get_entity({_describe_peer_id(candidate)}) returned {type(entity).__name__}: {reason}")
+            continue
+
+        entity = await _follow_migration(client, entity)
+        title = getattr(entity, 'title', getattr(entity, 'username', getattr(entity, 'first_name', 'Unknown')))
+        print(f"DEBUG: Successfully resolved channel/entity: '{title}' (ID: {getattr(entity, 'id', '?')})")
+        return entity
+
+    # Fallback: the entity may still be in this account's dialog list even when
+    # Telethon cannot resolve the bare ID from its session cache.
+    entity = None
+    scanned = 0
+    if candidate_ids:
+        print(f"Direct lookup for {original_input} failed. Searching through dialogs... this may take a moment.")
+        try:
+            entity, scanned = await _find_in_dialogs(client, candidate_ids)
         except Exception as dialog_err:
             print(f"Dialog search also failed: {dialog_err}")
-                 
-        # Final attempt: if it's numeric and it failed, maybe try adding -100 if it lacks it
-        if isinstance(channel_input, int) and channel_input > 0 and not str(channel_input).startswith("-100"):
-            try:
-                alt_id = int(f"-100{channel_input}")
-                channel = await client.get_entity(alt_id)
-                return channel
-            except: pass
-            
-        error_msg = f"Telegram completely declined access to {channel_input}."
-        if "Could not find the input entity" in str(e):
-            error_msg += (
-                f"\n\nWe scanned all {active_count} active and {archived_count} archived dialogs on this account, and the ID {original_input} is not among them."
-                f"\n\nTo fix this:\n1. Open the channel on your phone to refresh it to the top of your chat list.\n2. Ensure you are logged into the correct Telegram account covering these chats.\n3. OR bypass this entirely by pasting the invite link (https://t.me/...) into the search bar."
+            log_event(
+                "WARNING",
+                f"dialog scan failed while resolving {original_input}: "
+                f"{type(dialog_err).__name__}: {dialog_err}",
             )
-            
-        raise Exception(error_msg) # Re-raise with the helpful tip
+
+    if entity is not None:
+        return await _follow_migration(client, entity)
+
+    # Keep the real Telegram error in the message: a generic "access denied"
+    # leaves the user with no idea whether the ID is wrong, private, or banned.
+    primary = errors[0] if errors else (original_input, RuntimeError("Telegram returned no entity"))
+    detail = describe_download_error(primary[1])
+    raw_error = _clean_rpc_detail(primary[1])
+    error_msg = f"Telegram refused access to {original_input}."
+
+    # Name the account in use: a valid chat ID that resolves nowhere is usually
+    # either the wrong account or a chat that account is not a member of.
+    try:
+        me = await client.get_me()
+    except Exception:
+        me = None
+    if me is not None:
+        name = " ".join(
+            part for part in (getattr(me, "first_name", ""), getattr(me, "last_name", ""))
+            if part
+        ).strip()
+        account = name or "unknown name"
+        username = getattr(me, "username", None)
+        if username:
+            account += f" (@{username})"
+        account += f", id {getattr(me, 'id', '?')}"
+        error_msg += f"\nSigned in as: {account}"
+
+    error_msg += f"\n\nReason: {detail}"
+    if detail != raw_error:
+        error_msg += f"\nTelegram said: {raw_error}"
+    if len(errors) > 1:
+        also = "; ".join(
+            f"{_describe_peer_id(value)} -> {describe_download_error(err)}"
+            for value, err in errors[1:]
+        )
+        error_msg += f"\n\nAlso tried: {also}"
+    if candidate_ids:
+        error_msg += f"\n\nScanned {scanned} chat(s) on this account; none of these IDs matched."
+    error_msg += (
+        "\n\nTo fix this:\n"
+        "1. Open the chat on your phone so it moves to the top of your chat list, then retry.\n"
+        "2. Check that you are logged into the Telegram account that is a member of this chat.\n"
+        "3. Or paste the invite link (https://t.me/...) instead of the numeric ID."
+    )
+
+    log_event(
+        "ERROR",
+        f"fetch_channel failed for {original_input}: "
+        + "; ".join(
+            f"{value} -> {describe_download_error(err)} ({type(err).__name__}: {err})"
+            for value, err in errors
+        ),
+    )
+    raise Exception(error_msg) # Re-raise with the helpful tip
 import time
 
 def get_unique_filepath(folder, filename, reserved_paths=None):
@@ -228,15 +443,52 @@ def get_unique_filepath(folder, filename, reserved_paths=None):
 
     return new_filepath
 
-async def download_single_file(client, channel, message, folder_name, progress_cb=None, complete_cb=None, cancel_event=None, max_speed_kb=None, reserved_paths=None):
+async def download_single_file(client, channel, message, folder_name, progress_cb=None, complete_cb=None, cancel_event=None, max_speed_kb=None, reserved_paths=None, stall_cb=None):
     from ui.views.settings_view import load_config
     cfg = load_config()
     rename_duplicates = cfg.get("rename_duplicates", True)
     use_message_date = cfg.get("use_message_date", True)
     prefix_file_date = cfg.get("prefix_file_date", True)
+    try:
+        stall_warn = float(cfg.get("stall_warn_seconds", DEFAULT_STALL_WARN_SECONDS))
+        stall_abort = float(cfg.get("stall_abort_seconds", DEFAULT_STALL_ABORT_SECONDS))
+    except (TypeError, ValueError):
+        stall_warn = DEFAULT_STALL_WARN_SECONDS
+        stall_abort = DEFAULT_STALL_ABORT_SECONDS
+    if stall_abort <= 0:
+        stall_abort = None
+    if stall_warn < 0:
+        stall_warn = DEFAULT_STALL_WARN_SECONDS
+
+    # Shared stall-tracking state (containers so the nested callback can mutate)
+    last_activity = [time.time()]
+    stall_phase = ["waiting for the first response from Telegram"]
+    stall_warned = [False]
+    abort_reason = [None]
+
+    def fail(msg_id, reason):
+        """Report a failure together with the reason it happened."""
+        log_event("ERROR", f"message {msg_id}: {reason}")
+        if complete_cb:
+            complete_cb(msg_id, paused=False, filepath=None, error=True, reason=reason)
 
     max_retries = 3
     for attempt in range(max_retries):
+        last_activity[0] = time.time()
+        stall_phase[0] = "waiting for the first response from Telegram"
+        stall_warned[0] = False
+        abort_reason[0] = None
+
+        watchdog_stop = asyncio.Event()
+        watchdog_task = None
+        if (stall_warn or stall_abort) and message is not None:
+            watchdog_task = asyncio.create_task(
+                _stall_watchdog(
+                    message.id, last_activity, stall_phase, stall_warned, abort_reason,
+                    watchdog_stop, asyncio.current_task(), stall_warn, stall_abort, stall_cb,
+                )
+            )
+            watchdog_task.add_done_callback(_swallow_task_result)
         try:
             # Speed tracking variables & cancellation signal
             start_time = [time.time()]
@@ -249,6 +501,9 @@ async def download_single_file(client, channel, message, folder_name, progress_c
             async def internal_progress(current, total):
                 if cancel_event and cancel_event.is_set():
                     raise PauseRequested()
+
+                # Any callback means data is flowing again - reset the watchdog
+                last_activity[0] = time.time()
                 
                 tot = total or getattr(message, 'size', 0) or 0
                 if is_first_cb[0]:
@@ -285,6 +540,10 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     speed_str = f"{(speed_val/1024):.1f} MB/s" if speed_val > 1024 else f"{int(speed_val)} KB/s"
                     start_time[0] = now
                     last_bytes[0] = current
+                    stall_phase[0] = (
+                        f"transferred {_fmt_bytes(current)} of {_fmt_bytes(tot)}"
+                        if tot else f"transferred {_fmt_bytes(current)}"
+                    )
                     if progress_cb:
                         progress_cb(message.id, current, tot, speed_str=speed_str)
 
@@ -295,7 +554,11 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                 unlocked_items = [item for item in ext_list if isinstance(item, MessageExtendedMedia)]
                 if not unlocked_items:
                     stars = getattr(msg_media, 'stars_amount', 0)
-                    print(f"Skipping message {message.id}: Star Paid Media ({stars} Stars) is not purchased on this account.")
+                    log_event(
+                        "INFO",
+                        f"message {message.id}: skipped - Star paid media "
+                        f"({stars} Stars) is not purchased on this account",
+                    )
                     if progress_cb:
                         progress_cb(message.id, 0, 0, speed_str=f"Skipped ({stars}⭐ Unpaid)")
                     if complete_cb:
@@ -503,7 +766,11 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     if complete_cb: complete_cb(message.id, paused=True, filepath=None)
                     return
                 except Exception as fast_err:
-                    print(f"FastTelethon fallback for {message.id}: {fast_err}")
+                    log_event(
+                        "WARNING",
+                        f"message {message.id}: parallel engine failed, using Telethon "
+                        f"fallback - {describe_download_error(fast_err)} ({fast_err})",
+                    )
 
             if not file_path:
                 try:
@@ -567,6 +834,14 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     else:
                         raise attr_err
 
+            if not file_path:
+                fail(
+                    message.id,
+                    "Download produced no file - Telegram returned no data and the "
+                    "single-stream fallback failed",
+                )
+                break
+
             if complete_cb:
                 complete_cb(message.id, filepath=file_path)
                 
@@ -603,12 +878,23 @@ async def download_single_file(client, channel, message, folder_name, progress_c
             break
 
         except asyncio.CancelledError:
-            if complete_cb: complete_cb(message.id, paused=True, filepath=None)
+            if abort_reason[0]:
+                # The stall watchdog cancelled us: this is a failure with a reason,
+                # not a user pause, so report it as such.
+                fail(message.id, abort_reason[0])
+            else:
+                log_event("INFO", f"message {message.id}: cancelled/paused by user")
+                if complete_cb: complete_cb(message.id, paused=True, filepath=None)
             break
         except Exception as e:
+            reason = describe_download_error(e)
             if attempt < max_retries - 1:
                 wait_time = getattr(e, 'seconds', 2)
-                print(f"Error downloading {message.id}, retrying in {wait_time}s ({attempt+1}/{max_retries}): {e}")
+                log_event(
+                    "WARNING",
+                    f"message {message.id}: {reason} - retrying in {wait_time}s "
+                    f"(attempt {attempt+1}/{max_retries})",
+                )
                 await asyncio.sleep(wait_time)
                 if client and channel:
                     try:
@@ -616,14 +902,18 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                         if refreshed: message = refreshed
                     except: pass
             else:
-                print(f"Error downloading message {message.id} after {max_retries} attempts: {e}")
-                if complete_cb: complete_cb(message.id, paused=False, error=True)
+                fail(message.id, f"Failed after {max_retries} attempts - {reason}")
+        finally:
+            watchdog_stop.set()
+            if watchdog_task is not None and not watchdog_task.done():
+                watchdog_task.cancel()
 
-async def download_in_batches_headless(client, channel, messages, folder_name, batch_size, downloaded_state, progress_cb, complete_cb, task_cancel_event=None, max_speed_kb=None, msg_folder_resolver=None):
+async def download_in_batches_headless(client, channel, messages, folder_name, batch_size, downloaded_state, progress_cb, complete_cb, task_cancel_event=None, max_speed_kb=None, msg_folder_resolver=None, stall_cb=None, skipped_ids=None):
     semaphore = asyncio.Semaphore(batch_size)
     reserved_paths = set()
+    skipped_ids = set(skipped_ids or ())
     
-    def internal_complete(msg_id, paused=False, filepath=None, error=False):
+    def internal_complete(msg_id, paused=False, filepath=None, error=False, reason=None):
         if not paused and not error and filepath:
             # Persistent state in SQLite - only mark completed if file was actually downloaded
             from telethon.utils import get_peer_id
@@ -635,7 +925,11 @@ async def download_in_batches_headless(client, channel, messages, folder_name, b
             except: pass
             downloaded_state.add(msg_id)
         if complete_cb:
-            complete_cb(msg_id, paused=paused, filepath=filepath, error=error)
+            complete_cb(msg_id, paused=paused, filepath=filepath, error=error, reason=reason)
+
+    def internal_stall(msg_id, idle_seconds, phase):
+        if stall_cb:
+            stall_cb(msg_id, idle_seconds, phase)
 
     async def download_message(message):
         async with semaphore:
@@ -643,9 +937,10 @@ async def download_in_batches_headless(client, channel, messages, folder_name, b
                 if complete_cb: complete_cb(message.id, paused=True, filepath=None)
                 return
             target_folder = msg_folder_resolver(message) if msg_folder_resolver else folder_name
-            await download_single_file(client, channel, message, target_folder, progress_cb, internal_complete, task_cancel_event, max_speed_kb, reserved_paths=reserved_paths)
+            await download_single_file(client, channel, message, target_folder, progress_cb, internal_complete, task_cancel_event, max_speed_kb, reserved_paths=reserved_paths, stall_cb=internal_stall)
 
-    tasks = [download_message(m) for m in messages if m.id not in downloaded_state]
+    # Files the user removed from a task must never be queued again
+    tasks = [download_message(m) for m in messages if m.id not in downloaded_state and m.id not in skipped_ids]
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 

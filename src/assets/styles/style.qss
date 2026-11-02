@@ -176,6 +176,19 @@ QLabel#StatusBadge[state="completed"] {
     color: #059669; /* Emerald-600 */
     background: #D1FAE5; /* Emerald-100 */
 }
+QLabel#StatusBadge[state="stalled"] {
+    color: #C2410C; /* Orange-700 */
+    background: #FFEDD5; /* Orange-100 */
+}
+QLabel#StatusBadge[state="failed"] {
+    color: #B91C1C; /* Red-700 */
+    background: #FEE2E2; /* Red-100 */
+}
+
+QLabel#CardReason {
+    font-size: 11px;
+    padding: 2px 2px 0px 2px;
+}
 
 QLabel#TypePill {
     background: #E0F2FE; /* Blue-100 */
@@ -447,6 +460,41 @@ QProgressBar#FileProgressBar {
 QProgressBar#FileProgressBar[state="idle"]::chunk { background: #CBD5E1; }
 QProgressBar#FileProgressBar[state="active"]::chunk { background: #2BA5E4; }
 QProgressBar#FileProgressBar[state="completed"]::chunk { background: #10B981; }
+QProgressBar#FileProgressBar[state="stalled"]::chunk { background: #F59E0B; }
+QProgressBar#FileProgressBar[state="error"]::chunk { background: #EF4444; }
+
+/* Per-file failure reason shown under the filename */
+QLabel#FileRowReason {
+    font-size: 10px;
+    color: #EF4444;
+}
+
+/* Per-file remove button (drops one stuck item from the queue) */
+QPushButton#FileRowRemove {
+    background: transparent;
+    color: #94A3B8;
+    border: 1px solid #E2E8F0;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 0px;
+}
+QPushButton#FileRowRemove:hover {
+    background: #FEE2E2;
+    color: #EF4444;
+    border: 1px solid #FCA5A5;
+}
+
+/* Diagnostics log console */
+QTextEdit#LogView {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 6px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    color: #1E293B;
+    padding: 6px;
+}
 
 /* Dividers */
 QFrame#DividerHorizontal, QFrame#Divider {

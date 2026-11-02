@@ -14,6 +14,8 @@ from ui.views.settings_view import SettingsView
 from ui.views.downloads_view import DownloadsView
 from ui.views.file_manager_view import FileManagerView
 from ui.views.login_view import LoginView
+from ui.views.logs_view import LogsView
+from utils.app_logger import LogBus, log_event
 from PySide6.QtGui import QCloseEvent, QAction
 from resource_utils import get_resource_path
 from utils.update_checker import UpdateChecker
@@ -94,6 +96,7 @@ class MainWindow(QMainWindow):
                 <li>🌟 <b>Telegram Stars:</b> Direct download for purchased Star paid media.</li>
                 <li>🗄️ <b>SQLite Persistence:</b> Robust pause, resume, and queue retention.</li>
                 <li>📁 <b>File Manager:</b> Search, filter, inspect, and organize downloaded media.</li>
+                <li>🗒️ <b>Diagnostics Log:</b> Every failure and stall explained in the Logs tab.</li>
                 <li>📅 <b>Date & Handle Prefixing:</b> Chronological naming with <code>@channel_</code> tags.</li>
             </ul>
             
@@ -222,18 +225,21 @@ class MainWindow(QMainWindow):
         self.btn_home = self._create_nav_button("Home", "home.png", True)
         self.btn_queue = self._create_nav_button("Queue", "download.png")
         self.btn_files = self._create_nav_button("Files", "files.png")
+        self.btn_logs = self._create_nav_button("Logs", "log.png")
         self.btn_settings = self._create_nav_button("Settings", "setting.png")
         self.btn_about = self._create_nav_button("About", "info.png")
 
         self.btn_home.clicked.connect(lambda: self.switch_page("Home", 0))
         self.btn_queue.clicked.connect(lambda: self.switch_page("Queue", 1))
         self.btn_files.clicked.connect(lambda: self.switch_page("Files", 2))
-        self.btn_settings.clicked.connect(lambda: self.switch_page("Settings", 3))
+        self.btn_logs.clicked.connect(lambda: self.switch_page("Logs", 3))
+        self.btn_settings.clicked.connect(lambda: self.switch_page("Settings", 4))
         self.btn_about.clicked.connect(lambda: self.switch_page("About", -1))
 
         sidebar_layout.addWidget(self.btn_home)
         sidebar_layout.addWidget(self.btn_queue)
         sidebar_layout.addWidget(self.btn_files)
+        sidebar_layout.addWidget(self.btn_logs)
         sidebar_layout.addWidget(self.btn_settings)
         sidebar_layout.addStretch()
         sidebar_layout.addWidget(self.btn_about)
@@ -286,14 +292,16 @@ class MainWindow(QMainWindow):
         
         self.page_queue = DownloadsView()
         self.page_files = FileManagerView()
+        self.page_logs = LogsView()
         self.page_settings = SettingsView()
         self.page_login = LoginView()
         
         self.stacked_widget.addWidget(self.page_home)     # Index 0
         self.stacked_widget.addWidget(self.page_queue)    # Index 1
         self.stacked_widget.addWidget(self.page_files)    # Index 2
-        self.stacked_widget.addWidget(self.page_settings) # Index 3
-        self.stacked_widget.addWidget(self.page_login)    # Index 4
+        self.stacked_widget.addWidget(self.page_logs)     # Index 3
+        self.stacked_widget.addWidget(self.page_settings) # Index 4
+        self.stacked_widget.addWidget(self.page_login)    # Index 5
         
         # Connect Login signals
         self.page_login.login_started.connect(self.worker.start_login)
@@ -400,9 +408,13 @@ class MainWindow(QMainWindow):
             self.page_files.refresh_list()
             self.stacked_widget.setCurrentIndex(2)
             self.btn_files.setChecked(True)
-        elif "Settings" in item_text:
+        elif "Logs" in item_text:
             self.header.hide()
             self.stacked_widget.setCurrentIndex(3)
+            self.btn_logs.setChecked(True)
+        elif "Settings" in item_text:
+            self.header.hide()
+            self.stacked_widget.setCurrentIndex(4)
             self.btn_settings.setChecked(True)
         elif "About" in item_text:
             self.show_about_dialog()
@@ -411,7 +423,8 @@ class MainWindow(QMainWindow):
             if curr == 0: self.btn_home.setChecked(True)
             elif curr == 1: self.btn_queue.setChecked(True)
             elif curr == 2: self.btn_files.setChecked(True)
-            elif curr == 3: self.btn_settings.setChecked(True)
+            elif curr == 3: self.btn_logs.setChecked(True)
+            elif curr == 4: self.btn_settings.setChecked(True)
         else:
             self.header.hide()
 
@@ -454,8 +467,13 @@ class MainWindow(QMainWindow):
         self.worker.signals.download_progress.connect(self.update_progress)
         self.worker.signals.file_progress.connect(self.update_file_progress)
         self.worker.signals.file_completed.connect(self.on_file_completed)
+        self.worker.signals.file_failed.connect(self.on_file_failed)
+        self.worker.signals.file_stalled.connect(self.on_file_stalled)
         self.worker.signals.download_completed.connect(self.on_download_completed)
         self.worker.signals.error_occurred.connect(self.on_fetch_error)
+
+        # Every failure reason is mirrored into the Logs tab
+        LogBus.instance().record.connect(self.page_logs.append_log)
         
         self.page_settings.logoutRequested.connect(self.logout)
         self.page_settings.settingsSaved.connect(self.on_settings_saved)
@@ -698,7 +716,12 @@ class MainWindow(QMainWindow):
                 ch_in, m_id_str = self._reselect_task_id.rsplit('_', 1)
                 task_data = get_task_db(ch_in, int(m_id_str))
                 if task_data:
-                    existing_ids = task_data.get("selected_message_ids", [])
+                    # Files the user removed from this task must not come back
+                    removed = set(task_data.get("skipped_ids") or [])
+                    existing_ids = [
+                        mid for mid in task_data.get("selected_message_ids", [])
+                        if mid not in removed
+                    ]
             except: pass
             
         dialog = MediaBrowserDialog(title, messages_dict, self, previous_selected_ids=existing_ids, is_dark=is_dark)
@@ -845,6 +868,7 @@ class MainWindow(QMainWindow):
         card.removeRequested.connect(self.remove_task)
         card.moveUpRequested.connect(self.move_task_up)
         card.moveDownRequested.connect(self.move_task_down)
+        card.removeFileRequested.connect(self.remove_file_from_task)
 
     def move_card(self, card, direction):
         """direction: -1 (up), 1 (down)"""
@@ -908,6 +932,67 @@ class MainWindow(QMainWindow):
             
             self.card_widgets[task_id].mark_file_completed(msg_id)
             self.refresh_global_status()
+
+    def on_file_failed(self, task_id, msg_id, reason):
+        """A file gave up after its retries - show why it did."""
+        card = self.card_widgets.get(task_id)
+        if card:
+            card.mark_file_failed(msg_id, reason)
+            self.refresh_global_status()
+
+    def on_file_stalled(self, task_id, msg_id, reason):
+        """A file stopped making progress - surface it before it blocks the queue."""
+        card = self.card_widgets.get(task_id)
+        if card:
+            card.mark_file_stalled(msg_id, reason)
+
+    def remove_file_from_task(self, task_id, msg_id):
+        """Let the user drop one stuck/failed item so the task can still finish."""
+        reply = QMessageBox.question(
+            self, "Remove File From Queue",
+            f"Remove file #{msg_id} from this task?\n\n"
+            "Any partial data is deleted and the item will not be downloaded again, "
+            "so the rest of the queue can continue.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        card = self.card_widgets.get(task_id)
+        folder = card.folder_name if card else None
+        filename = None
+        if card:
+            meta = next((m for m in card.files_metadata if m.get("id") == msg_id), None)
+            if meta:
+                filename = meta.get("name")
+
+        # Best effort: the file may still be open by the download engine
+        if folder and filename:
+            for suffix in ("", ".part", ".part.meta"):
+                path = os.path.join(folder, filename + suffix)
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception as e:
+                        log_event("WARNING", f"could not delete {path}: {e}")
+
+        # Unmark in the database so verification does not chase a ghost
+        try:
+            from database import unmark_media_completed
+            c_id = str(task_id).split("_")[0].replace("-100", "", 1)
+            unmark_media_completed(c_id, msg_id)
+        except Exception as e:
+            log_event("WARNING", f"could not unmark file {msg_id}: {e}")
+
+        # Tell the worker to stop counting and queueing this item
+        self.worker.skip_file(task_id, msg_id)
+
+        if card:
+            card.remove_file(msg_id)
+            if card.total_items == 0 or card.completed >= card.total_items:
+                self.on_download_completed(task_id, card.folder_name)
+            else:
+                self.refresh_global_status()
 
     def remove_task(self, task_id):
         if task_id in self.card_widgets:

@@ -18,6 +18,7 @@ from core_downloader import (
 )
 from utils.file_utils import get_media_filename
 from resource_utils import get_project_root
+from utils.app_logger import log_event
 
 class WorkerSignals(QObject):
     # Auth Signals
@@ -33,6 +34,8 @@ class WorkerSignals(QObject):
     download_progress = Signal(str, int, int) # task_id, current_items, total_items
     file_progress = Signal(str, int, int, int, str) # task_id, msg_id, current_bytes, total_bytes, speed_str
     file_completed = Signal(str, int) # task_id, msg_id
+    file_failed = Signal(str, int, str) # task_id, msg_id, reason
+    file_stalled = Signal(str, int, str) # task_id, msg_id, reason
     download_completed = Signal(str, str) # task_id, folder_name
     error_occurred = Signal(str, str) # task_id, error_msg
 
@@ -48,6 +51,8 @@ class TelegramWorker(QThread):
         self.client = None
         self.task_cancel_events = {}
         self.running_tasks = {} # task_id -> future or task
+        # task_id -> set of message IDs the user removed from that task
+        self.skipped_files = {}
 
     def _create_client(self):
         from ui.views.settings_view import get_telegram_proxy
@@ -226,7 +231,7 @@ class TelegramWorker(QThread):
             
             self.signals.media_list_fetched.emit(channel_input, channel, messages_dict)
         except Exception as e:
-            self.signals.error_occurred.emit(channel_input, f"Fetch Error: {str(e)}")
+            self.signals.error_occurred.emit(channel_input, str(e))
 
     def start_download(self, channel_input, media_id, download_path, download_limit, max_speed_kb, is_paused=False, selected_message_ids=None, task_id=None):
         """Called from Main UI Thread. Schedules download in asyncio loop."""
@@ -354,6 +359,49 @@ class TelegramWorker(QThread):
         # Explicitly pass is_paused=False to resume
         self.start_download(channel_input, media_id, download_path, download_limit, max_speed_kb, is_paused=False, selected_message_ids=None)
         
+    def skip_file(self, task_id, msg_id):
+        """Remove a single file from a task so the rest of the queue can finish.
+
+        Used by the UI when the user deletes an item that failed or stalled.
+        The ID is remembered in memory (so the live run stops counting it) and
+        persisted in SQLite (so resuming the task does not queue it again).
+        """
+        try:
+            key = str(task_id)
+            msg_id = int(msg_id)
+        except (TypeError, ValueError):
+            return False
+
+        try:
+            self.skipped_files.setdefault(key, set()).add(msg_id)
+            # The UI may still hold a username-based key while the running loop
+            # uses the resolved numeric one - keep both in sync for this channel.
+            try:
+                from database import normalize_channel_key
+                norm = normalize_channel_key(key)
+                for other in list(self.skipped_files.keys()):
+                    if other != key and normalize_channel_key(other) == norm:
+                        self.skipped_files[other].add(msg_id)
+            except Exception:
+                pass
+
+            try:
+                from database import add_task_skipped_id
+                if not add_task_skipped_id(key, msg_id):
+                    log_event(
+                        "WARNING",
+                        f"[{key}] removed file {msg_id} but no saved task matched, "
+                        "so it may be queued again after a restart",
+                    )
+            except Exception as e:
+                log_event("WARNING", f"[{key}] could not persist removed file {msg_id}: {e}")
+
+            log_event("INFO", f"[{key}] removed file {msg_id} from the queue by user request")
+            return True
+        except Exception as e:
+            log_event("ERROR", f"skip_file failed for {task_id}/{msg_id}: {e}")
+            return False
+
     def cancel_download(self, task_id):
         self.pause_download(task_id)
         if task_id in self.task_cancel_events:
@@ -426,6 +474,14 @@ class TelegramWorker(QThread):
                         old_t.cancel()
             
             self.running_tasks[task_id] = asyncio.current_task()
+
+            # Restore files the user removed from this task in an earlier session
+            skipped_ids = self.skipped_files.setdefault(task_id, set())
+            try:
+                from database import load_task_skipped_ids
+                skipped_ids.update(load_task_skipped_ids(task_id))
+            except Exception as e:
+                log_event("WARNING", f"[{task_id}] could not load removed files: {e}")
             
             # 0. Load the downloaded state (Isolated by channel ID)
             resolved_peer_id = None
@@ -659,8 +715,9 @@ class TelegramWorker(QThread):
                 downloaded_state = actual_downloaded_state
             
             already_completed_count = sum(1 for m in messages if m.id in downloaded_state)
-            messages_to_download = [m for m in messages if m.id not in downloaded_state]
-            total_items = all_messages_count
+            messages_to_download = [m for m in messages if m.id not in downloaded_state and m.id not in skipped_ids]
+            # Items the user removed are excluded from the task's totals
+            total_items = max(0, all_messages_count - sum(1 for m in messages if m.id in skipped_ids))
             completed_initial = already_completed_count
 
             # 4. Emit the REAL metadata to update the placeholder card
@@ -729,7 +786,8 @@ class TelegramWorker(QThread):
                     "id": msg.id,
                     "name": fname,
                     "size": fsize,
-                    "completed": msg.id in downloaded_state
+                    "completed": msg.id in downloaded_state,
+                    "removed": msg.id in skipped_ids
                 })
 
             # Update the same card again with full file list
@@ -771,21 +829,38 @@ class TelegramWorker(QThread):
 
             completed_count = [completed_initial]
 
-            def on_file_complete(msg_id, paused=False, filepath=None, error=False):
-                if not paused and not error:
+            def effective_total():
+                # Files the user removed no longer count towards completion, so a
+                # task with a permanently broken item can still finish.
+                return max(0, total_items - len(skipped_ids))
+
+            def mark_task_done():
+                try:
+                    tkList = load_active_tasks()
+                    tkList = [tk for tk in tkList if not (str(tk.get("channel_input", "")).replace("-100", "", 1) == ch_resolved_clean and tk.get("media_id") == media_id and tk.get("topic_id") == topic_id)]
+                    save_active_tasks(tkList)
+                except Exception as e:
+                    log_event("WARNING", f"[{task_id}] could not remove finished task: {e}")
+                self.signals.download_completed.emit(task_id, folder_name)
+
+            def on_file_complete(msg_id, paused=False, filepath=None, error=False, reason=None):
+                if error:
+                    # Report the reason instead of silently leaving the row pending
+                    text = reason or "Unknown error"
+                    log_event("ERROR", f"[{title}] file {msg_id} failed: {text}")
+                    self.signals.file_failed.emit(task_id, msg_id, text)
+                    return
+                if not paused:
                     self.signals.file_completed.emit(task_id, msg_id)
                     completed_count[0] += 1
-                    self.signals.download_progress.emit(task_id, completed_count[0], total_items)
-                    if completed_count[0] >= total_items:
-                        # Remove from active tasks using the stable numeric ID
-                        try:
-                            tkList = load_active_tasks()
-                            tkList = [tk for tk in tkList if not (str(tk.get("channel_input", "")).replace("-100", "", 1) == ch_resolved_clean and tk.get("media_id") == media_id and tk.get("topic_id") == topic_id)]
-                            save_active_tasks(tkList)
-                        except Exception as e:
-                            print(f"Error removing task: {e}")
-                        
-                        self.signals.download_completed.emit(task_id, folder_name)
+                    self.signals.download_progress.emit(task_id, completed_count[0], effective_total())
+                    if completed_count[0] >= effective_total():
+                        mark_task_done()
+
+            def on_file_stall(msg_id, idle_seconds, phase):
+                text = f"No progress for {idle_seconds}s - {phase}"
+                log_event("WARNING", f"[{title}] file {msg_id} stalled: {text}")
+                self.signals.file_stalled.emit(task_id, msg_id, text)
 
             def on_file_progress(msg_id, current, total, speed_str="0 KB/s"):
                 self.signals.file_progress.emit(task_id, msg_id, current, total, speed_str)
@@ -801,11 +876,15 @@ class TelegramWorker(QThread):
                 complete_cb=on_file_complete,
                 task_cancel_event=global_cancel_event,
                 max_speed_kb=max_speed_kb if max_speed_kb > 0 else None,
-                msg_folder_resolver=msg_folder_resolver
+                msg_folder_resolver=msg_folder_resolver,
+                stall_cb=on_file_stall,
+                skipped_ids=skipped_ids
             )
             
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
 
         except Exception as e:
+            from utils.app_logger import describe_download_error
+            log_event("ERROR", f"task {original_task_id or channel_input} aborted: {describe_download_error(e)} ({e})")
             self.signals.error_occurred.emit(channel_input, str(e))

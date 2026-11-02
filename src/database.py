@@ -51,9 +51,16 @@ def init_db():
         selected_ids TEXT, -- JSON list of message IDs
         title TEXT,
         total_items INTEGER,
-        folder_name TEXT
+        folder_name TEXT,
+        skipped_ids TEXT -- JSON list of message IDs the user removed from this task
     )
     """)
+
+    # Migration: tasks removed individually by the user (e.g. items that stalled)
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN skipped_ids TEXT")
+    except sqlite3.OperationalError:
+        pass
     
     conn.commit()
     conn.close()
@@ -94,12 +101,15 @@ def save_task_db(task):
         task_id = f"{ch_key}_{topic_id}_{media_id}" if topic_id else f"{ch_key}_{media_id}"
     
     selected_json = json.dumps(task.get("selected_message_ids", []))
+    skipped_list = task.get("skipped_ids") or []
+    skipped_json = json.dumps(sorted({int(m) for m in skipped_list}))
     
     cursor.execute("""
     INSERT INTO tasks (
         task_id, channel_input, media_id, paused, download_path, 
-        download_limit, max_speed_kb, selected_ids, title, total_items, folder_name
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        download_limit, max_speed_kb, selected_ids, title, total_items, folder_name,
+        skipped_ids
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(task_id) DO UPDATE SET
         channel_input=excluded.channel_input,
         paused=excluded.paused,
@@ -109,12 +119,13 @@ def save_task_db(task):
         selected_ids=excluded.selected_ids,
         title=excluded.title,
         total_items=excluded.total_items,
-        folder_name=excluded.folder_name
+        folder_name=excluded.folder_name,
+        skipped_ids=excluded.skipped_ids
     """, (
         task_id, ch, media_id, 1 if task.get("paused") else 0,
         task.get("download_path"), task.get("download_limit"),
         task.get("max_speed_kb"), selected_json, task.get("title"),
-        task.get("total_items"), task.get("folder_name")
+        task.get("total_items"), task.get("folder_name"), skipped_json
     ))
     
     conn.commit()
@@ -137,6 +148,16 @@ def update_task_paused_db(task_id_or_chan, is_paused=True):
     conn.commit()
     conn.close()
 
+def _parse_id_list(raw):
+    """Parse a JSON list column, tolerating NULL and malformed values."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return list(data) if isinstance(data, list) else []
+    except Exception:
+        return []
+
 def load_active_tasks_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -148,7 +169,8 @@ def load_active_tasks_db():
     for r in rows:
         t = dict(r)
         t["paused"] = bool(t["paused"])
-        t["selected_message_ids"] = json.loads(t["selected_ids"])
+        t["selected_message_ids"] = _parse_id_list(t.get("selected_ids"))
+        t["skipped_ids"] = _parse_id_list(t.get("skipped_ids"))
         tasks.append(t)
     
     conn.close()
@@ -165,9 +187,78 @@ def get_task_db(ch_input, media_id=6):
     conn.close()
     if row:
         t = dict(row)
-        t["selected_message_ids"] = json.loads(t["selected_ids"])
+        t["selected_message_ids"] = _parse_id_list(t.get("selected_ids"))
+        t["skipped_ids"] = _parse_id_list(t.get("skipped_ids"))
         return t
     return None
+
+def _task_match_query(task_id_or_chan):
+    """Build a WHERE clause that finds a task row from a card's task_id.
+
+    Cards are usually keyed by the resolved numeric ID, but a card can still
+    hold a username-based key, so both the full key and the channel portion are
+    matched (the same forgiving approach used by ``update_task_paused_db``).
+    """
+    key = str(task_id_or_chan)
+    clean = normalize_channel_key(key)
+    candidates = [clean]
+    chan_only = normalize_channel_key(key.split("_")[0])
+    if chan_only and chan_only != clean:
+        candidates.append(chan_only)
+
+    clauses = ["task_id=?", "channel_input=?", "title=?"]
+    params = [key, key, key]
+    for candidate in dict.fromkeys(c for c in candidates if c):
+        clauses.append("task_id LIKE ?")
+        params.append(f"%{candidate}%")
+        clauses.append("channel_input LIKE ?")
+        params.append(f"%{candidate}%")
+
+    return "SELECT task_id, skipped_ids FROM tasks WHERE " + " OR ".join(clauses), params
+
+def add_task_skipped_id(task_id_or_chan, msg_id):
+    """Persistently remember that the user removed one file from a task.
+
+    Without this, resuming the task would queue the removed message again.
+    Returns how many task rows were updated (0 means the removal was not
+    persisted because no matching task row exists).
+    """
+    try:
+        msg_id = int(msg_id)
+    except (TypeError, ValueError):
+        return 0
+
+    query, params = _task_match_query(task_id_or_chan)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+
+    updated = 0
+    for row in cursor.fetchall():
+        ids = set(_parse_id_list(row["skipped_ids"]))
+        ids.add(msg_id)
+        cursor.execute(
+            "UPDATE tasks SET skipped_ids=? WHERE task_id=?",
+            (json.dumps(sorted(ids)), row["task_id"]),
+        )
+        updated += 1
+    conn.commit()
+    conn.close()
+    return updated
+
+def load_task_skipped_ids(task_id_or_chan):
+    """Return the set of message IDs the user removed from a task."""
+    query, params = _task_match_query(task_id_or_chan)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    ids = set()
+    for row in cursor.fetchall():
+        ids.update(_parse_id_list(row["skipped_ids"]))
+    conn.close()
+    return ids
 
 def remove_task_db(ch_input, media_id):
     conn = sqlite3.connect(DB_PATH)

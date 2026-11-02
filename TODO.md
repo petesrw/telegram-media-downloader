@@ -42,7 +42,12 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.8.4
+- **Current Version**: 2.9.0
+- **Completed in v2.9.0**:
+  - [x] **Download Diagnostics**: Failures now carry a reason (rate limit, timeout, access lost, disk full, ...) instead of being swallowed by a `print()` that a windowed build never shows.
+  - [x] **Stall Watchdog**: Files with no progress are flagged as Stalled (45s default) and stalled attempts are cancelled after 180s so they release their concurrency slot instead of hanging the queue.
+  - [x] **Logs Tab & downloader.log**: New sidebar view with level filtering, auto-scroll and a rotating log file for support.
+  - [x] **Per-File Removal**: Remove a single broken item from a task (partial data cleaned, choice persisted in `skipped_ids`) so the remaining files can finish.
 - **Completed in v2.8.4**:
   - [x] **Telegram Stars Paid Media**: Detect, unpack, and download purchased Star photos, videos, and multi-media albums (`MessageMediaPaidMedia`).
   - [x] **Channel Handle Filename Prefixing**: Prepend `@{username}_` or `channel_title_` to downloaded media filenames via GUI setting toggle.

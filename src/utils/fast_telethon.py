@@ -6,7 +6,16 @@ import time
 from telethon.tl.functions.upload import GetFileRequest
 from telethon.utils import get_input_location
 
+from utils.app_logger import log_event, describe_download_error
+
 CHUNK_SIZE = 512 * 1024  # 512 KB per chunk (Telegram MTProto max limit)
+
+# Number of times a single chunk is retried before the whole file attempt fails.
+CHUNK_MAX_ATTEMPTS = 5
+# Upper bound for how long a chunk can go without an answer from Telegram.
+CHUNK_REQUEST_TIMEOUT = 25.0
+# Upper bound for borrowing an exported (per-datacentre) sender.
+SENDER_BORROW_TIMEOUT = 15.0
 
 
 def _load_meta(meta_path, file_size, total_parts):
@@ -92,32 +101,59 @@ async def _atomic_finalize_async(temp_path, target_path, meta_path=None):
 
 
 async def _download_part(client, location, offset, limit, dc_id=None):
-    """Fetches a single chunk from Telegram with timeout and retries."""
-    for attempt in range(5):
+    """Fetches a single chunk from Telegram with timeout and retries.
+
+    Every retry and the final failure are logged, because a chunk that keeps
+    timing out is the usual reason a large download appears to hang.
+    """
+    for attempt in range(CHUNK_MAX_ATTEMPTS):
         try:
             req = GetFileRequest(location=location, offset=offset, limit=limit)
             if dc_id:
-                sender = await asyncio.wait_for(client._borrow_exported_sender(dc_id), timeout=15.0)
+                sender = await asyncio.wait_for(
+                    client._borrow_exported_sender(dc_id), timeout=SENDER_BORROW_TIMEOUT
+                )
                 try:
-                    result = await asyncio.wait_for(sender.send(req), timeout=25.0)
+                    result = await asyncio.wait_for(
+                        sender.send(req), timeout=CHUNK_REQUEST_TIMEOUT
+                    )
                 finally:
                     await client._return_exported_sender(sender)
             else:
-                result = await asyncio.wait_for(client(req), timeout=25.0)
+                result = await asyncio.wait_for(client(req), timeout=CHUNK_REQUEST_TIMEOUT)
             return result.bytes if result else b""
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if attempt < 4:
-                from telethon.errors import FloodWaitError
-                if isinstance(e, FloodWaitError):
-                    wait = getattr(e, 'seconds', 1.0)
-                    await asyncio.sleep(wait)
-                else:
-                    wait = getattr(e, 'seconds', 1.0)
-                    await asyncio.sleep(min(wait, 3.0))
-            else:
+            last_attempt = attempt >= CHUNK_MAX_ATTEMPTS - 1
+            reason = describe_download_error(e)
+            if last_attempt:
+                log_event(
+                    "ERROR",
+                    f"chunk @{offset} ({limit} bytes) failed after "
+                    f"{CHUNK_MAX_ATTEMPTS} attempts: {reason} ({e})",
+                )
                 raise e
+
+            from telethon.errors import FloodWaitError
+
+            if isinstance(e, FloodWaitError):
+                wait = getattr(e, 'seconds', 1.0)
+                log_event(
+                    "WARNING",
+                    f"chunk @{offset}: FloodWait {wait}s, waiting "
+                    f"(attempt {attempt + 1}/{CHUNK_MAX_ATTEMPTS})",
+                )
+                await asyncio.sleep(wait)
+            else:
+                wait = getattr(e, 'seconds', 1.0)
+                backoff = min(wait, 3.0)
+                log_event(
+                    "WARNING",
+                    f"chunk @{offset}: {reason} - retrying in {backoff}s "
+                    f"(attempt {attempt + 1}/{CHUNK_MAX_ATTEMPTS})",
+                )
+                await asyncio.sleep(backoff)
 
 
 async def fast_download_file(client, location, target_path, file_size, dc_id=None, progress_callback=None, cancel_event=None, workers=4):
@@ -259,6 +295,12 @@ async def fast_download_file(client, location, target_path, file_size, dc_id=Non
         return False
     except Exception as e:
         _save_meta(meta_path, file_size, CHUNK_SIZE, total_parts, completed_parts)
+        done = len(completed_parts)
+        log_event(
+            "WARNING",
+            f"parallel download of {os.path.basename(target_path)} stopped at "
+            f"{done}/{total_parts} chunks: {describe_download_error(e)}",
+        )
         raise e
     finally:
         for t in tasks:
@@ -283,4 +325,11 @@ async def fast_download_file(client, location, target_path, file_size, dc_id=Non
         await _atomic_finalize_async(temp_path, target_path, meta_path)
         return True
 
+    # Not a hard error, but the caller has to fall back to Telethon's own
+    # downloader, so leave a breadcrumb explaining why.
+    log_event(
+        "WARNING",
+        f"parallel download of {os.path.basename(target_path)} incomplete "
+        f"({len(completed_parts)}/{total_parts} chunks) - falling back to Telethon",
+    )
     return False

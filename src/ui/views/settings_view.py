@@ -23,6 +23,9 @@ def load_config():
         "prefix_file_date": True,
         "prefix_channel_handle": False,
         "redownload_deleted": False,
+        "stall_warn_seconds": 45,   # report "no progress" after this many seconds
+        "stall_abort_seconds": 180, # cancel a stalled attempt so it frees its slot
+        "log_to_file": True,        # write downloader.log next to config.json
         "dark_mode": None,  # None = follow Windows system setting
         "proxy": {
             "enabled": False,
@@ -282,10 +285,39 @@ class SettingsView(QWidget):
         self.spin_fetch_limit.setRange(10, 50000)
         self.spin_fetch_limit.setFixedHeight(30)
         limit_grid.addWidget(self.spin_fetch_limit, 2, 1)
+
+        limit_grid.addWidget(QLabel("Report \"No Progress\" After (seconds):", objectName="ControlLabel"), 3, 0)
+        self.spin_stall_warn = QSpinBox()
+        self.spin_stall_warn.setRange(0, 3600)
+        self.spin_stall_warn.setFixedHeight(30)
+        self.spin_stall_warn.setToolTip(
+            "A file that transfers nothing for this long is marked as stalled in the "
+            "queue and recorded in the Logs tab. Raise it on very slow connections. "
+            "0 disables the warning."
+        )
+        limit_grid.addWidget(self.spin_stall_warn, 3, 1)
+
+        limit_grid.addWidget(QLabel("Abort Stalled Download After (seconds):", objectName="ControlLabel"), 4, 0)
+        self.spin_stall_abort = QSpinBox()
+        self.spin_stall_abort.setRange(0, 7200)
+        self.spin_stall_abort.setFixedHeight(30)
+        self.spin_stall_abort.setToolTip(
+            "A stalled attempt is cancelled after this long so it stops holding a "
+            "concurrency slot and the rest of the queue can continue. The file stays "
+            "in the queue so you can resume or remove it. 0 disables the abort."
+        )
+        limit_grid.addWidget(self.spin_stall_abort, 4, 1)
         
         self.clayout.addLayout(limit_grid)
         self.clayout.addWidget(QLabel("Set 0 for unlimited speed. Using higher concurrency index may lead to better speeds but uses more resources.", objectName="MutedText"))
         self.clayout.addWidget(QLabel("The Initial Fetch Limit controls how many recent items are scanned when searching for a channel.", objectName="MutedText"))
+
+        self.chk_log_to_file = QCheckBox("Write Diagnostics Log File (downloader.log)")
+        self.chk_log_to_file.setToolTip(
+            "Records download failures, stall warnings and retries to downloader.log "
+            "next to config.json. Shown in the Logs tab either way."
+        )
+        self.clayout.addWidget(self.chk_log_to_file)
 
         self.clayout.addStretch()
 
@@ -350,6 +382,9 @@ class SettingsView(QWidget):
         self.chk_prefix_file_date.setChecked(config.get("prefix_file_date", True))
         self.chk_prefix_channel_handle.setChecked(config.get("prefix_channel_handle", False))
         self.chk_redownload_deleted.setChecked(config.get("redownload_deleted", False))
+        self.spin_stall_warn.setValue(int(config.get("stall_warn_seconds", 45)))
+        self.spin_stall_abort.setValue(int(config.get("stall_abort_seconds", 180)))
+        self.chk_log_to_file.setChecked(config.get("log_to_file", True))
         
         proxy = config.get("proxy", {})
         self.chk_enable_proxy.setChecked(proxy.get("enabled", False))
@@ -372,6 +407,9 @@ class SettingsView(QWidget):
             "prefix_file_date": self.chk_prefix_file_date.isChecked(),
             "prefix_channel_handle": self.chk_prefix_channel_handle.isChecked(),
             "redownload_deleted": self.chk_redownload_deleted.isChecked(),
+            "stall_warn_seconds": self.spin_stall_warn.value(),
+            "stall_abort_seconds": self.spin_stall_abort.value(),
+            "log_to_file": self.chk_log_to_file.isChecked(),
             "proxy": {
                 "enabled": self.chk_enable_proxy.isChecked(),
                 "type": self.combo_proxy_type.currentText(),
@@ -382,6 +420,13 @@ class SettingsView(QWidget):
             }
         })
         save_config(config)
+
+        # Apply the log_to_file toggle without a restart
+        try:
+            from utils.app_logger import reload_logger
+            reload_logger()
+        except Exception:
+            pass
         
         # Sync existing database tasks with updated limits
         try:

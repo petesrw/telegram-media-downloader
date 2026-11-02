@@ -48,6 +48,8 @@ Native SOCKS5, SOCKS4, and HTTP proxy support routed directly through Telethon v
 - 🔍 **Media Browser Search** — live filter bar to find any file by name instantly
 - ✅ **Selection Counter** — "X of Y files selected" counter updates as you tick boxes
 - 📥 **Empty State Screens** — friendly placeholders on Home and Downloads before any tasks are added
+- 🗒 **Diagnostics Log** — a Logs tab that explains every failure and stall, mirrored to `downloader.log`
+- 🗑 **Per-File Removal** — drop one stuck item from a queue without discarding the whole task
 - 📂 **Media Browser** — category-based file browser (Media, Files, Music, Links, GIFs)
 - ⚡ **Parallel Fetch** — all categories load simultaneously via `asyncio.gather` (~5x faster)
 - 🌟 **Telegram Stars Paid Media** — automatically downloads purchased Star posts (photos, videos, and multi-item albums)
@@ -154,6 +156,13 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 ---
 
 ## Changelog
+
+### v2.9.0
+- 🗒️ **Diagnostics Log Tab & `downloader.log`**: Added a new **Logs** view in the sidebar that streams every download failure, stall warning and retry with a timestamp, plus a filter (all / warnings / errors), auto-scroll, and a button to open the rotating log file (`downloader.log`, 5 MB × 3 files).
+- 🔍 **Failure Reasons Instead Of Silent Hangs**: Failures are no longer swallowed. Each item now reports *why* it failed (rate limit, network timeout, lost access, disk full, expired file reference, ...), shown on the file row, on the task card and in the log. The packaged build previously discarded every diagnostic because it runs without a console.
+- ⏱️ **Stall Watchdog**: A download that transfers nothing for 45s (configurable) is flagged as **Stalled** with the last known position, and one that stays idle for 180s (configurable) is cancelled so it stops occupying a concurrency slot - the usual cause of a queue that appears to hang.
+- 🗑️ **Per-File Removal**: Expanded queue items now have a ✕ button per file. Removing one deletes its partial `.part`/`.part.meta` data, unmarks it in the database, and remembers it (`skipped_ids`) so resuming never queues it again - letting the rest of the task complete.
+- ⚙️ **Stall Thresholds In Settings**: "Report No Progress After" and "Abort Stalled Download After" (plus a `Write Diagnostics Log File` toggle) can be tuned for slow connections.
 
 ### v2.8.5
 - 🌐 **End-to-End Proxy Support**: Plumbed proxy routing directly into all `TelegramClient` connection instances using `python-socks[asyncio]`. Fully supports SOCKS5, SOCKS4, and HTTP proxies across all authentication calls, dialog fetches, and multi-part media downloads.

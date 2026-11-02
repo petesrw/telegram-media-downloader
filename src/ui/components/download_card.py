@@ -41,6 +41,7 @@ class DownloadCard(QWidget):
     moveUpRequested = Signal(str)
     moveDownRequested = Signal(str)
     reselectRequested = Signal(str)
+    removeFileRequested = Signal(str, int)  # task_id, msg_id
 
     # ──────────────────────────────────────────────────────────────────────────
     # UI
@@ -116,6 +117,15 @@ class DownloadCard(QWidget):
         self.lbl_verify_status.setStyleSheet("color: #FBBF24; font-weight: bold;")
         self.lbl_verify_status.setVisible(False)
         rc.addWidget(self.lbl_verify_status)
+
+        # row 3.6 - last failure / stall reason (hidden until there is one)
+        self.lbl_reason = QLabel("")
+        self.lbl_reason.setObjectName("CardReason")
+        self.lbl_reason.setWordWrap(True)
+        self.lbl_reason.setVisible(False)
+        rc.addWidget(self.lbl_reason)
+
+        self.failed_count = 0
 
         # row 4 – action buttons
         ar = QHBoxLayout()
@@ -307,25 +317,91 @@ class DownloadCard(QWidget):
                 if size < 1024: return f"{size:.1f} {unit}"
                 size /= 1024
             return f"{size:.1f} GB"
-            
+
+        # Items the user removed are not part of the queue any more
+        visible_meta = [m for m in self.files_metadata if not m.get("removed")]
+
         max_visible = 100
-        for idx, meta in enumerate(self.files_metadata[:max_visible]):
+        for idx, meta in enumerate(visible_meta[:max_visible]):
             row = FileRow(meta["id"], meta["name"], fmt(meta["size"]), idx)
             if meta.get("completed"):
                 row.set_completed()
+            row.removeRequested.connect(self._on_row_remove_requested)
             self.files_layout.addWidget(row)
             self.file_rows[meta["id"]] = row
-            
-        if len(self.files_metadata) > max_visible:
+
+        if len(visible_meta) > max_visible:
             from PySide6.QtWidgets import QLabel
-            more_count = len(self.files_metadata) - max_visible
+            more_count = len(visible_meta) - max_visible
             lbl_more = QLabel(f"◈ ... and {more_count} more files in queue ...")
             lbl_more.setObjectName("MutedText")
             lbl_more.setAlignment(Qt.AlignCenter)
             lbl_more.setStyleSheet("padding: 8px; font-style: italic; color: #888;")
             self.files_layout.addWidget(lbl_more)
 
+    # ── per-file failure / stall reporting ──────────────────────────────
+    def _on_row_remove_requested(self, msg_id):
+        self.removeFileRequested.emit(self.task_id, msg_id)
+
+    def _show_reason(self, text, color):
+        self.lbl_reason.setText(text)
+        self.lbl_reason.setStyleSheet(f"color: {color};")
+        self.lbl_reason.setVisible(bool(text))
+
+    def _refresh_status_badge(self, state, text):
+        self.lbl_status_text.setText(text)
+        self.lbl_status_text.setProperty("state", state)
+        self.lbl_status_text.style().unpolish(self.lbl_status_text)
+        self.lbl_status_text.style().polish(self.lbl_status_text)
+
+    def mark_file_failed(self, msg_id, reason):
+        """Show that one file could not be downloaded, and why."""
+        self.failed_count += 1
+        self._show_reason(f"❌ File {msg_id} failed: {reason}", "#EF4444")
+        self._refresh_status_badge("failed", f"Failed: {self.failed_count}")
+        row = self.file_rows.get(msg_id)
+        if row:
+            row.set_failed(reason)
+
+    def mark_file_stalled(self, msg_id, reason):
+        """Show that a file stopped making progress, with the last known state."""
+        self._show_reason(f"⚠️ File {msg_id} is stalled: {reason}", "#F59E0B")
+        self._refresh_status_badge("stalled", "Stalled")
+        row = self.file_rows.get(msg_id)
+        if row:
+            row.set_stalled(reason)
+
+    def clear_reason(self):
+        self._show_reason("", "")
+
+    def remove_file(self, msg_id):
+        """Drop one file from this card and adjust the counters accordingly."""
+        row = self.file_rows.pop(msg_id, None)
+        if row:
+            row.setParent(None)
+            row.deleteLater()
+
+        self.files_metadata = [m for m in self.files_metadata if m.get("id") != msg_id]
+        self.lbl_reason.setVisible(False)
+        self.failed_count = 0
+
+        # A removed item is no longer pending work
+        self.total_items = max(0, self.total_items - 1)
+        if self.completed > self.total_items:
+            self.completed = self.total_items
+        self.batch_progress_bar.setMaximum(max(self.total_items, 1))
+        self.batch_progress_bar.setValue(self.completed)
+        self.lbl_status.setText(f"Downloaded {self.completed} out of {self.total_items} items")
+
+        if self.completed >= self.total_items:
+            self._set_completed_style()
+            self.btn_pause.setEnabled(False)
+        else:
+            self._refresh_status_badge("active", "Downloading…")
+
     def update_file_progress(self, msg_id, current_bytes, total_bytes, speed_str):
+        # A file that reports progress is no longer stalled
+        self.lbl_reason.setVisible(False)
         self.lbl_status_text.setText(f"⬇ {speed_str}")
         
         # Extract numeric speed for global stats (e.g. "450 KB/s" -> 450)
@@ -496,23 +572,38 @@ class DownloadCard(QWidget):
 # FileRow – shown in the expand area
 # ──────────────────────────────────────────────────────────────────────────────
 class FileRow(QWidget):
+    removeRequested = Signal(int)  # msg_id
+
     def __init__(self, msg_id, filename, size_str, row_index=0):
         super().__init__()
+        self.msg_id = msg_id
         self.setObjectName("FileRow")
         self.setProperty("alt", row_index % 2 == 1)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(34) # Slightly taller for better readability
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 10, 0)
+        layout.setContentsMargins(8, 4, 10, 4)
         layout.setSpacing(8)
 
         self.icon = QLabel("⏳")
         self.icon.setFixedWidth(18)
         self.icon.setObjectName("FileRowIcon")
 
+        # Name + optional reason line (stacked so long reasons stay readable)
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(0)
+
         self.lbl_name = QLabel(filename)
         self.lbl_name.setObjectName("FileRowName")
+
+        self.lbl_reason = QLabel("")
+        self.lbl_reason.setObjectName("FileRowReason")
+        self.lbl_reason.setVisible(False)
+
+        text_col.addWidget(self.lbl_name)
+        text_col.addWidget(self.lbl_reason)
 
         self.lbl_size = QLabel(size_str)
         self.lbl_size.setFixedWidth(58)
@@ -528,10 +619,30 @@ class FileRow(QWidget):
         self.bar.setObjectName("FileProgressBar")
         self.bar.setProperty("state", "idle")
 
+        self.btn_remove = QPushButton("✕")
+        self.btn_remove.setObjectName("FileRowRemove")
+        self.btn_remove.setToolTip(
+            "Remove this file from the queue so the task can continue"
+        )
+        self.btn_remove.setFixedSize(20, 20)
+        self.btn_remove.setCursor(Qt.PointingHandCursor)
+        self.btn_remove.clicked.connect(lambda: self.removeRequested.emit(self.msg_id))
+
         layout.addWidget(self.icon)
-        layout.addWidget(self.lbl_name, stretch=3)
+        layout.addLayout(text_col, stretch=3)
         layout.addWidget(self.lbl_size)
         layout.addWidget(self.bar)
+        layout.addWidget(self.btn_remove)
+
+    def _set_reason(self, text, color="#EF4444"):
+        self.lbl_reason.setText(text)
+        if color:
+            self.lbl_reason.setStyleSheet(f"color: {color};")
+        self.lbl_reason.setVisible(bool(text))
+        self.lbl_name.setToolTip(text or self.lbl_name.text())
+        self.setToolTip(text or "")
+        # Give the row extra room for the second line only when it is shown
+        self.setFixedHeight(48 if text else 34)
 
     def set_progress(self, current, total):
         if total:
@@ -549,3 +660,20 @@ class FileRow(QWidget):
         self.bar.style().unpolish(self.bar)
         self.bar.style().polish(self.bar)
         self.icon.setText("✅")
+        self._set_reason("")
+
+    def set_failed(self, reason):
+        """Icon + tooltip explaining why this file could not be downloaded."""
+        self.bar.setProperty("state", "error")
+        self.bar.style().unpolish(self.bar)
+        self.bar.style().polish(self.bar)
+        self.icon.setText("❌")
+        self._set_reason(reason, "#EF4444")
+
+    def set_stalled(self, reason):
+        """Icon + tooltip for a file that stopped making progress."""
+        self.bar.setProperty("state", "stalled")
+        self.bar.style().unpolish(self.bar)
+        self.bar.style().polish(self.bar)
+        self.icon.setText("⚠️")
+        self._set_reason(reason, "#F59E0B")
