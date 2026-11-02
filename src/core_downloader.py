@@ -55,12 +55,31 @@ async def _stall_watchdog(message_id, last_activity, stall_phase, warned, abort_
                           stop_event, download_task, warn_seconds, abort_seconds, stall_cb,
                           poll_seconds=STALL_POLL_SECONDS):
     """Report (and eventually cancel) a download that stopped making progress."""
+    last_rate_limit_note = [None]
     while True:
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
             return
         except asyncio.TimeoutError:
             pass
+
+        # A FloodWait is a deliberate pause, not a stall: while the shared gate
+        # is open the download is healthy, so never abort it - report the wait
+        # instead so the card explains the 0% rather than looking hung.
+        remaining = GLOBAL_FLOODGATE.remaining()
+        if remaining > 0:
+            last_activity[0] = time.time()
+            minutes = max(1, int((remaining + 59) // 60))
+            if last_rate_limit_note[0] != minutes:
+                last_rate_limit_note[0] = minutes
+                phase = f"Telegram rate limit - resuming in ~{minutes}m"
+                stall_phase[0] = phase
+                if stall_cb:
+                    try:
+                        stall_cb(message_id, 0, phase)
+                    except Exception:
+                        pass
+            continue
 
         idle = time.time() - last_activity[0]
         if warn_seconds and idle >= warn_seconds and not warned[0]:
@@ -510,6 +529,11 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     is_first_cb[0] = False
                     last_bytes[0] = current
                     start_time[0] = time.time()
+                    if current > 0:
+                        # Resume offset read from disk, not data from Telegram
+                        stall_phase[0] = (
+                            f"resumed at {_fmt_bytes(current)}, waiting for more data from Telegram"
+                        )
                     if progress_cb:
                         initial_status = "Resuming..." if current > 0 else "Starting..."
                         progress_cb(message.id, current, tot, speed_str=initial_status)

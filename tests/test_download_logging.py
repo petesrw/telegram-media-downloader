@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import core_downloader as cd
 import database
 import utils.app_logger as al
+from utils.fast_telethon import DownloadFloodGate
 from utils.app_logger import (
     LogBus,
     describe_download_error,
@@ -264,6 +265,73 @@ class TestStallWatchdog(unittest.TestCase):
 
         # It is allowed to warn, but it must terminate once stop is set
         self._run(scenario())
+
+
+class TestFloodGate(unittest.TestCase):
+
+    def test_remaining_tracks_an_active_flood_wait(self):
+        gate = DownloadFloodGate(min_request_interval=0, cooldown_period=0)
+        self.assertEqual(gate.remaining(), 0.0)
+
+        gate.trip(120)
+
+        self.assertGreater(gate.remaining(), 100)
+        gate.reset()
+        self.assertEqual(gate.remaining(), 0.0)
+
+
+class TestRateLimitIsNotAStall(unittest.TestCase):
+    """A FloodWait is a deliberate pause and must never abort the download."""
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_watchdog_waits_out_a_flood_wait_instead_of_aborting(self):
+        class OpenGate:
+            def remaining(self):
+                return 600.0
+
+        original = cd.GLOBAL_FLOODGATE
+        cd.GLOBAL_FLOODGATE = OpenGate()
+        try:
+            async def scenario():
+                stop = asyncio.Event()
+                phase = ["waiting for the first response from Telegram"]
+                events = []
+                download = asyncio.create_task(asyncio.sleep(3600))
+                await asyncio.sleep(0.02)
+
+                watchdog = asyncio.create_task(
+                    cd._stall_watchdog(
+                        9, [time.time()], phase, [False], [None], stop, download,
+                        warn_seconds=0.01, abort_seconds=0.02,
+                        stall_cb=lambda mid, idle, ph: events.append((mid, idle, ph)),
+                        poll_seconds=0.01,
+                    )
+                )
+                await asyncio.sleep(0.12)
+                aborted = download.cancelled()
+
+                stop.set()
+                await watchdog
+                download.cancel()
+                await asyncio.gather(download, return_exceptions=True)
+                return events, aborted, phase[0]
+
+            events, aborted, phase = self._run(scenario())
+        finally:
+            cd.GLOBAL_FLOODGATE = original
+
+        self.assertFalse(aborted, "a FloodWait pause must not be treated as a stall")
+        self.assertTrue(events, "the wait should be surfaced to the UI")
+        self.assertEqual(events[0][0], 9)
+        self.assertEqual(events[0][1], 0)
+        self.assertIn("rate limit", events[0][2].lower())
+        self.assertIn("rate limit", phase.lower())
 
 
 class TestFailureReasons(unittest.TestCase):

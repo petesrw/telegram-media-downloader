@@ -139,6 +139,12 @@ class DownloadFloodGate:
     def state(self):
         return self._state
 
+    def remaining(self) -> float:
+        """Seconds left before an active FloodWait expires (0 when not gated)."""
+        if self._state != "OPEN":
+            return 0.0
+        return max(0.0, self._wait_until - time.monotonic())
+
     def reset(self):
         """Resets the gate to initial CLOSED state."""
         self._wait_until = 0.0
@@ -225,6 +231,43 @@ class DownloadFloodGate:
 GLOBAL_FLOODGATE = DownloadFloodGate()
 
 
+def _needs_exported_sender(client, dc_id):
+    """True when the file lives on a DC other than the one the client is on.
+
+    Exporting authorization to the client's own DC fails with DcIdInvalidError,
+    and Telethon connects the new sender before exporting, so every such attempt
+    also leaks an open socket. Same-DC files go through the main connection,
+    which is what Telethon's own download_file does.
+    """
+    if not dc_id:
+        return False
+    session = getattr(client, "session", None)
+    home_dc = getattr(session, "dc_id", None)
+    return home_dc is None or dc_id != home_dc
+
+
+async def _evict_exported_sender(client, dc_id, sender):
+    """Drops a cached exported sender that can no longer send.
+
+    Telethon only marks a borrowed sender for reconnect after nobody has
+    borrowed it for a while, so with parallel workers borrowing nonstop a sender
+    whose reconnect gave up is handed out forever ("Cannot send requests while
+    disconnected"). Removing it makes the next borrow build a fresh connection.
+    """
+    lock = getattr(client, "_borrow_sender_lock", None)
+    cache = getattr(client, "_borrowed_senders", None)
+    if lock is not None and cache is not None:
+        async with lock:
+            _state, cached = cache.get(dc_id, (None, None))
+            if cached is sender:
+                del cache[dc_id]
+                log_event("WARNING", f"dropped dead connection to DC {dc_id}; reconnecting")
+    try:
+        await sender.disconnect()
+    except Exception:
+        pass
+
+
 async def _download_part(client, location, offset, limit, dc_id=None, gate=None, cancel_event=None):
     """Fetches a single chunk from Telegram with timeout, proactive gating and retries.
 
@@ -242,7 +285,7 @@ async def _download_part(client, location, offset, limit, dc_id=None, gate=None,
 
         try:
             req = GetFileRequest(location=location, offset=offset, limit=limit)
-            if dc_id:
+            if _needs_exported_sender(client, dc_id):
                 sender = await asyncio.wait_for(
                     client._borrow_exported_sender(dc_id), timeout=SENDER_BORROW_TIMEOUT
                 )
@@ -250,6 +293,9 @@ async def _download_part(client, location, offset, limit, dc_id=None, gate=None,
                     result = await asyncio.wait_for(
                         sender.send(req), timeout=CHUNK_REQUEST_TIMEOUT
                     )
+                except ConnectionError:
+                    await _evict_exported_sender(client, dc_id, sender)
+                    raise
                 finally:
                     await client._return_exported_sender(sender)
             else:

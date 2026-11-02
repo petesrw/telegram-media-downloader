@@ -365,8 +365,13 @@ class DownloadCard(QWidget):
 
     def mark_file_stalled(self, msg_id, reason):
         """Show that a file stopped making progress, with the last known state."""
-        self._show_reason(f"⚠️ File {msg_id} is stalled: {reason}", "#F59E0B")
-        self._refresh_status_badge("stalled", "Stalled")
+        if str(reason).lower().startswith("telegram rate limit"):
+            # FloodWait is a temporary, expected pause - the file is not broken.
+            self._show_reason(f"⏳ {reason}", "#F59E0B")
+            self._refresh_status_badge("stalled", "Rate Limited")
+        else:
+            self._show_reason(f"⚠️ File {msg_id} is stalled: {reason}", "#F59E0B")
+            self._refresh_status_badge("stalled", "Stalled")
         row = self.file_rows.get(msg_id)
         if row:
             row.set_stalled(reason)

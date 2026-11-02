@@ -858,8 +858,13 @@ class TelegramWorker(QThread):
                         mark_task_done()
 
             def on_file_stall(msg_id, idle_seconds, phase):
-                text = f"No progress for {idle_seconds}s - {phase}"
-                log_event("WARNING", f"[{title}] file {msg_id} stalled: {text}")
+                if str(phase).startswith("Telegram rate limit"):
+                    # Deliberate FloodWait pause: not a stalled file.
+                    text = phase
+                    log_event("WARNING", f"[{title}] {text}")
+                else:
+                    text = f"No progress for {idle_seconds}s - {phase}"
+                    log_event("WARNING", f"[{title}] file {msg_id} stalled: {text}")
                 self.signals.file_stalled.emit(task_id, msg_id, text)
 
             def on_file_progress(msg_id, current, total, speed_str="0 KB/s"):
