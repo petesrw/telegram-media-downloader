@@ -100,13 +100,146 @@ async def _atomic_finalize_async(temp_path, target_path, meta_path=None):
     return False
 
 
-async def _download_part(client, location, offset, limit, dc_id=None):
-    """Fetches a single chunk from Telegram with timeout and retries.
+class DownloadFloodGate:
+    """
+    Proactive rate-limiter, shared flood-wait gate, and circuit breaker
+    for FastTelethon parallel chunk workers.
+
+    1. Proactive Spacing: Smooths out 0ms simultaneous chunk burst spikes across workers.
+    2. Shared Reactive Gate: When ANY worker hits FloodWaitError, ALL workers
+       pause immediately for the full duration (+ safety buffer) to prevent
+       Telegram from escalating the ban.
+    3. Half-Open Cooldown: After a flood-wait clears, requests are gently spaced
+       under restricted concurrency so cooling endpoints aren't immediately re-banned.
+    """
+
+    def __init__(self, min_request_interval: float = 0.02, cooldown_period: float = 5.0):
+        self._min_request_interval = min_request_interval  # 20ms burst pacing
+        self._cooldown_period = cooldown_period            # 5s half-open cooldown
+        self._wait_until = 0.0
+        self._half_open_until = 0.0
+        self._state = "CLOSED"  # "CLOSED", "OPEN", "HALF_OPEN"
+        self._last_request_time = 0.0
+        self._consecutive_successes = 0
+        self._lock = None
+        self._loop = None
+
+    @property
+    def lock(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._lock is None or self._loop != loop:
+            self._lock = asyncio.Lock()
+            self._loop = loop
+        return self._lock
+
+    @property
+    def state(self):
+        return self._state
+
+    def reset(self):
+        """Resets the gate to initial CLOSED state."""
+        self._wait_until = 0.0
+        self._half_open_until = 0.0
+        self._state = "CLOSED"
+        self._last_request_time = 0.0
+        self._consecutive_successes = 0
+
+    def trip(self, seconds: float):
+        """Trips the circuit breaker into OPEN state for the given duration."""
+        now = time.monotonic()
+        wait_duration = max(float(seconds), 1.0) + 1.5  # +1.5s safety buffer
+        target_wait = now + wait_duration
+        if target_wait > self._wait_until:
+            self._wait_until = target_wait
+        self._state = "OPEN"
+        self._consecutive_successes = 0
+
+    def report_success(self):
+        """Called when a chunk request succeeds to heal the circuit breaker."""
+        if self._state == "HALF_OPEN":
+            self._consecutive_successes += 1
+            if self._consecutive_successes >= 3:
+                self._state = "CLOSED"
+                self._half_open_until = 0.0
+
+    async def wait_if_gated(self, cancel_event=None):
+        """Waits if the gate is currently OPEN due to an active flood wait."""
+        while self._state == "OPEN":
+            if cancel_event and cancel_event.is_set():
+                return False
+            now = time.monotonic()
+            if now < self._wait_until:
+                sleep_time = min(self._wait_until - now, 0.5)
+                await asyncio.sleep(sleep_time)
+            else:
+                break
+        return True
+
+    async def acquire(self, cancel_event=None):
+        """
+        Pauses if gate is OPEN (flood wait) or HALF_OPEN (cooling),
+        and applies proactive pacing to avoid burst spikes.
+        Returns True if acquired, or False if cancelled.
+        """
+        async with self.lock:
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    return False
+
+                now = time.monotonic()
+
+                # 1. Active flood wait (OPEN)
+                if self._state == "OPEN":
+                    if now < self._wait_until:
+                        sleep_time = min(self._wait_until - now, 0.5)
+                        await asyncio.sleep(sleep_time)
+                        continue
+                    else:
+                        # Cooldown window has passed; transition to HALF_OPEN
+                        self._state = "HALF_OPEN"
+                        self._half_open_until = now + self._cooldown_period
+                        self._consecutive_successes = 0
+
+                # 2. Cooling down after flood wait (HALF_OPEN)
+                if self._state == "HALF_OPEN":
+                    if now >= self._half_open_until:
+                        self._state = "CLOSED"
+                    else:
+                        # Gently space out requests during cooldown (200ms)
+                        await asyncio.sleep(0.2)
+
+                # 3. Proactive pacing: eliminate 0ms burst spikes
+                now = time.monotonic()
+                time_since_last = now - self._last_request_time
+                if time_since_last < self._min_request_interval:
+                    sleep_interval = self._min_request_interval - time_since_last
+                    await asyncio.sleep(sleep_interval)
+
+                self._last_request_time = time.monotonic()
+                return True
+
+
+GLOBAL_FLOODGATE = DownloadFloodGate()
+
+
+async def _download_part(client, location, offset, limit, dc_id=None, gate=None, cancel_event=None):
+    """Fetches a single chunk from Telegram with timeout, proactive gating and retries.
 
     Every retry and the final failure are logged, because a chunk that keeps
     timing out is the usual reason a large download appears to hang.
     """
     for attempt in range(CHUNK_MAX_ATTEMPTS):
+        if cancel_event and cancel_event.is_set():
+            raise asyncio.CancelledError()
+
+        if gate:
+            allowed = await gate.acquire(cancel_event=cancel_event)
+            if not allowed:
+                raise asyncio.CancelledError()
+
         try:
             req = GetFileRequest(location=location, offset=offset, limit=limit)
             if dc_id:
@@ -121,6 +254,10 @@ async def _download_part(client, location, offset, limit, dc_id=None):
                     await client._return_exported_sender(sender)
             else:
                 result = await asyncio.wait_for(client(req), timeout=CHUNK_REQUEST_TIMEOUT)
+
+            if gate:
+                gate.report_success()
+
             return result.bytes if result else b""
         except asyncio.CancelledError:
             raise
@@ -139,12 +276,14 @@ async def _download_part(client, location, offset, limit, dc_id=None):
 
             if isinstance(e, FloodWaitError):
                 wait = getattr(e, 'seconds', 1.0)
+                if gate:
+                    gate.trip(wait)
                 log_event(
                     "WARNING",
                     f"chunk @{offset}: FloodWait {wait}s, waiting "
                     f"(attempt {attempt + 1}/{CHUNK_MAX_ATTEMPTS})",
                 )
-                await asyncio.sleep(wait)
+                await asyncio.sleep(wait + 1.0)
             else:
                 wait = getattr(e, 'seconds', 1.0)
                 backoff = min(wait, 3.0)
@@ -156,11 +295,14 @@ async def _download_part(client, location, offset, limit, dc_id=None):
                 await asyncio.sleep(backoff)
 
 
-async def fast_download_file(client, location, target_path, file_size, dc_id=None, progress_callback=None, cancel_event=None, workers=4):
+async def fast_download_file(client, location, target_path, file_size, dc_id=None, progress_callback=None, cancel_event=None, workers=4, gate=None):
     """
-    Downloads media at maximum throughput using parallel chunk streams with resumable state.
+    Downloads media at maximum throughput using parallel chunk streams with resumable state
+    and proactive FloodWait circuit breaker protection.
     Falls back gracefully if parallel streaming is not supported for the media.
     """
+    if gate is None:
+        gate = GLOBAL_FLOODGATE
     if file_size <= 0:
         return False
 
@@ -258,7 +400,7 @@ async def fast_download_file(client, location, target_path, file_size, dc_id=Non
             offset = part_idx * CHUNK_SIZE
             limit = CHUNK_SIZE
 
-            chunk = await _download_part(client, location, offset, limit, dc_id=dc_id)
+            chunk = await _download_part(client, location, offset, limit, dc_id=dc_id, gate=gate, cancel_event=cancel_event)
             if not chunk:
                 queue.task_done()
                 continue
@@ -289,7 +431,7 @@ async def fast_download_file(client, location, target_path, file_size, dc_id=Non
     try:
         tasks = [asyncio.create_task(worker()) for _ in range(min(workers, len(missing_parts)))]
         await asyncio.gather(*tasks)
-    except DownloadCancelled:
+    except (DownloadCancelled, asyncio.CancelledError):
         # User paused/cancelled: persist current meta for future resume
         _save_meta(meta_path, file_size, CHUNK_SIZE, total_parts, completed_parts)
         return False

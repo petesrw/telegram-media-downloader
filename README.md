@@ -4,6 +4,10 @@
 [![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/vinodkr494/telegram-media-downloader/total?style=flat-square)](https://github.com/vinodkr494/telegram-media-downloader/releases)
 🚀 **Bulk-download videos, images, PDFs, audio & more** from any Telegram channel or group. Features a **Premium PySide6 Dashboard** with high-performance analytics, **Global Queue Tracking** (Total progress % & Session usage), **Advanced Task Management** (Prioritize & Cancel), category browser, real-time search, parallel downloads, smart deduplication, speed limiter, proxy support, and desktop notifications.
 
+<p align="center">
+  <img src="screenshots/app_demo.gif" alt="Telegram Media Downloader Demo" width="880" />
+</p>
+
 ### 🗄️ SQLite Persistence Engine
 Transitioned from legacy JSON files to a robust, indexed **SQLite database**. All tasks, message IDs, and download states are now stored with full data integrity.
 
@@ -163,6 +167,12 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 - ⏱️ **Stall Watchdog**: A download that transfers nothing for 45s (configurable) is flagged as **Stalled** with the last known position, and one that stays idle for 180s (configurable) is cancelled so it stops occupying a concurrency slot - the usual cause of a queue that appears to hang.
 - 🗑️ **Per-File Removal**: Expanded queue items now have a ✕ button per file. Removing one deletes its partial `.part`/`.part.meta` data, unmarks it in the database, and remembers it (`skipped_ids`) so resuming never queues it again - letting the rest of the task complete.
 - ⚙️ **Stall Thresholds In Settings**: "Report No Progress After" and "Abort Stalled Download After" (plus a `Write Diagnostics Log File` toggle) can be tuned for slow connections.
+### v2.8.6
+- 🛡️ **Proactive Anti-Flood Gate & Circuit Breaker**: Introduced a zero-dependency shared `DownloadFloodGate` for FastTelethon parallel chunk workers. Prevents cascading multi-hour Telegram bans by coordinating all concurrent workers and download tasks.
+- ⏱️ **Inter-Worker Request Burst Pacing**: Eliminates 0ms microsecond burst spikes by gently pacing chunk dispatches across all parallel streams.
+- ⚡ **Shared Reactive Circuit Breaker**: When any worker or download encounters a `FloodWaitError`, all workers across all active downloads pause immediately for the full wait duration plus safety buffer, preventing Telegram from escalating the restriction.
+- 🔄 **Half-Open Cooldown Recovery**: After a flood-wait clears, workers resume in a restricted pacing window to allow cooling endpoints to stabilize before returning to full throughput.
+- 🪟 **Atomic Config File Lock Protection**: Added retry handling for atomic configuration file replacement on Windows, preventing file-lock collisions during rapid setting updates.
 
 ### v2.8.5
 - 🌐 **End-to-End Proxy Support**: Plumbed proxy routing directly into all `TelegramClient` connection instances using `python-socks[asyncio]`. Fully supports SOCKS5, SOCKS4, and HTTP proxies across all authentication calls, dialog fetches, and multi-part media downloads.

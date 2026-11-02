@@ -4,6 +4,7 @@ import os
 import tempfile
 import shutil
 import asyncio
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
@@ -13,7 +14,9 @@ from utils.fast_telethon import (
     _atomic_finalize_sync,
     _atomic_finalize_async,
     _save_meta,
-    _load_meta
+    _load_meta,
+    DownloadFloodGate,
+    GLOBAL_FLOODGATE
 )
 
 
@@ -250,6 +253,110 @@ class TestFastTelethon(unittest.TestCase):
         loop.close()
 
         self.assertFalse(os.path.exists(target_path))
+
+    def test_floodgate_trip_and_recovery(self):
+        gate = DownloadFloodGate(min_request_interval=0.01, cooldown_period=0.1)
+        self.assertEqual(gate.state, "CLOSED")
+
+        loop = asyncio.new_event_loop()
+
+        async def run_test():
+            ok = await gate.acquire()
+            self.assertTrue(ok)
+            self.assertEqual(gate.state, "CLOSED")
+
+            # Trip with 0.1s duration
+            gate.trip(0.1)
+            self.assertEqual(gate.state, "OPEN")
+
+            # In OPEN state, wait_if_gated pauses until expiration
+            t0 = time.monotonic()
+            await gate.wait_if_gated()
+            elapsed = time.monotonic() - t0
+            self.assertGreaterEqual(elapsed, 0.1)
+
+            # Next acquire will transition from OPEN to HALF_OPEN
+            ok2 = await gate.acquire()
+            self.assertTrue(ok2)
+            self.assertEqual(gate.state, "HALF_OPEN")
+
+            # Reporting 3 successes heals back to CLOSED
+            gate.report_success()
+            gate.report_success()
+            gate.report_success()
+            self.assertEqual(gate.state, "CLOSED")
+
+        loop.run_until_complete(run_test())
+        loop.close()
+
+    def test_floodgate_cancellation_during_open(self):
+        gate = DownloadFloodGate(min_request_interval=0.01, cooldown_period=1.0)
+        gate.trip(10.0)  # Trip with 10s wait
+        cancel_event = asyncio.Event()
+
+        loop = asyncio.new_event_loop()
+
+        async def run_test():
+            async def trigger_cancel():
+                await asyncio.sleep(0.05)
+                cancel_event.set()
+
+            asyncio.create_task(trigger_cancel())
+            t0 = time.monotonic()
+            ok = await gate.acquire(cancel_event=cancel_event)
+            elapsed = time.monotonic() - t0
+            self.assertFalse(ok)
+            self.assertLess(elapsed, 1.0)
+
+        loop.run_until_complete(run_test())
+        loop.close()
+
+    def test_fast_download_with_floodgate_coordination(self):
+        target_path = os.path.join(self.temp_dir, "flood_coord.mp4")
+        file_size = CHUNK_SIZE * 3
+        gate = DownloadFloodGate(min_request_interval=0.01, cooldown_period=0.1)
+
+        from telethon.errors import FloodWaitError
+
+        has_flooded = [False]
+
+        class FloodMockSender(MockSender):
+            async def send(self, req):
+                if req.offset == 0 and not has_flooded[0]:
+                    has_flooded[0] = True
+                    err = FloodWaitError(request=req)
+                    err.seconds = 0.2
+                    raise err
+                return await super().send(req)
+
+        class FloodMockClient(MockClient):
+            def __init__(self, requested_offsets, chunk_data):
+                super().__init__(requested_offsets, chunk_data)
+                self.sender = FloodMockSender(requested_offsets, chunk_data)
+
+            async def __call__(self, req):
+                if req.offset == 0 and not has_flooded[0]:
+                    has_flooded[0] = True
+                    err = FloodWaitError(request=req)
+                    err.seconds = 0.2
+                    raise err
+                return await super().__call__(req)
+
+        requested_offsets = []
+        chunk_data = {i * CHUNK_SIZE: b"Z" * CHUNK_SIZE for i in range(3)}
+        client = FloodMockClient(requested_offsets, chunk_data)
+        loc = MockInputLocation()
+
+        loop = asyncio.new_event_loop()
+        success = loop.run_until_complete(
+            fast_download_file(client, loc, target_path, file_size, dc_id=1, workers=2, gate=gate)
+        )
+        loop.close()
+
+        self.assertTrue(success)
+        self.assertTrue(has_flooded[0], "Simulated FloodWait should have triggered")
+        self.assertTrue(os.path.exists(target_path))
+        self.assertEqual(os.path.getsize(target_path), file_size)
 
 
 if __name__ == "__main__":

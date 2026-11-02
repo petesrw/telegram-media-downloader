@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 import json
 import os
+import time
 from resource_utils import get_project_root
 
 CONFIG_FILE = os.path.join(get_project_root(), "config.json")
@@ -53,11 +54,19 @@ def load_config():
     return default_config
 
 def save_config(config_data):
+    temp_file = CONFIG_FILE + ".tmp"
     try:
-        temp_file = CONFIG_FILE + ".tmp"
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=4)
-        os.replace(temp_file, CONFIG_FILE)
+        for attempt in range(5):
+            try:
+                os.replace(temp_file, CONFIG_FILE)
+                break
+            except (PermissionError, OSError):
+                if attempt < 4:
+                    time.sleep(0.1)
+                else:
+                    raise
     except Exception as e:
         print(f"Error saving config: {e}")
 
