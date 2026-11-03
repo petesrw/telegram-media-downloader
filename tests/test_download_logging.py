@@ -194,6 +194,39 @@ class TestLogsViewRendering(unittest.TestCase):
         self.view.combo_filter.setCurrentIndex(0)  # all levels
         self.assertIn("filter-blue-marker", self.view.rendered_text())
 
+    def test_each_record_appears_once(self):
+        # The main window also connected LogBus to the view, so every line
+        # showed twice. The view subscribes itself; nobody else may.
+        log_event("ERROR", "once-marker")
+        self.view._flush_pending()
+
+        self.assertEqual(self.view.rendered_text().count("once-marker"), 1)
+
+    def test_records_logged_before_the_view_opened_keep_their_level(self):
+        from ui.views.logs_view import LogsView
+
+        log_event("ERROR", "preload-marker")
+        view = LogsView()
+
+        self.assertIn("[ERROR] preload-marker", view.rendered_text())
+        view.combo_filter.setCurrentIndex(1)  # errors only
+        self.assertIn("preload-marker", view.rendered_text())
+
+    def test_log_file_history_is_shown_verbatim(self):
+        from ui.views.logs_view import LogsView
+
+        line = "2026-11-03 12:00:00,000 [WARNING] file-history-marker"
+        with open(al.get_log_path(), "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        saved = list(al._RING)
+        al._RING.clear()
+        try:
+            view = LogsView()
+        finally:
+            al._RING.extend(saved)
+
+        self.assertIn(line, view.rendered_text().splitlines())
+
 
 class TestStallWatchdog(unittest.TestCase):
 

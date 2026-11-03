@@ -124,13 +124,14 @@ class LogsView(QWidget):
 
     def _preload(self):
         """Show what is already in the ring buffer and the log file."""
+        # _lines holds (level, timestamp, message), the order LogBus emits
         for timestamp, level, message in get_recent_logs(MAX_VISIBLE_LINES):
-            self._lines.append((timestamp, level, message))
+            self._lines.append((level, timestamp, message))
 
         # If the app just started, the file holds history from previous runs
         if not self._lines:
             for raw in tail_log_file(500):
-                self._lines.append((raw, "", ""))
+                self._lines.append(("", "", raw))
 
         if self._lines:
             self.lbl_empty.setVisible(False)

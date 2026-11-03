@@ -15,7 +15,7 @@ from ui.views.downloads_view import DownloadsView
 from ui.views.file_manager_view import FileManagerView
 from ui.views.login_view import LoginView
 from ui.views.logs_view import LogsView
-from utils.app_logger import LogBus, log_event
+from utils.app_logger import log_event
 from PySide6.QtGui import QCloseEvent, QAction
 from resource_utils import get_resource_path
 from utils.update_checker import UpdateChecker
@@ -472,9 +472,8 @@ class MainWindow(QMainWindow):
         self.worker.signals.download_completed.connect(self.on_download_completed)
         self.worker.signals.error_occurred.connect(self.on_fetch_error)
 
-        # Every failure reason is mirrored into the Logs tab
-        LogBus.instance().record.connect(self.page_logs.append_log)
-        
+        # LogsView subscribes itself to LogBus; connecting here too doubled every line
+
         self.page_settings.logoutRequested.connect(self.logout)
         self.page_settings.settingsSaved.connect(self.on_settings_saved)
         # sidebar signals are now handled by button connects
