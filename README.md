@@ -162,6 +162,7 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 ## Changelog
 
 ### v2.9.1
+- ▶️ **Unfinished Tasks Resume After A Restart**: A whole-category task that was still running when the app closed came back marked "Completed" without downloading the rest. Its "no selection" was saved as an empty selection, so the restart fetched zero messages. It now fetches the whole category again and continues.
 - 🔁 **Resume From `.part` Instead Of Restarting**: A file the stall watchdog cancels, or whose chunks keep timing out, now keeps its downloaded chunks and resumes from them. Before, it fell back to a single-stream download from byte 0 straight into the final file.
 - 🔌 **Automatic Reconnect**: Telethon stops retrying a dropped connection after a few seconds. The app now reconnects by itself, instead of failing every remaining file with "Cannot send requests while disconnected" until a restart. Requests that Telethon cancels on a dropped connection are retried, and are no longer logged as "cancelled/paused by user".
 - 🛰️ **Same-DC Downloads Use The Main Connection**: Files on the account's own data centre no longer export authorization to it. That export failed with `DC_ID_INVALID` and leaked a socket on every attempt. A dead connection to another DC is dropped and rebuilt instead of being reused.

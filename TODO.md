@@ -44,6 +44,7 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 - **Current Version**: 2.9.1
 - **Completed in v2.9.1**:
+  - [x] **Resume After Restart**: Whole-category tasks reload without a selection instead of an empty one, so they no longer show "Completed" after reopening the app.
   - [x] **Resume After Stalls/Timeouts**: Watchdog cancels and chunk timeouts keep `.part` progress instead of restarting through the single-stream fallback.
   - [x] **Automatic Reconnect**: The main client reconnects after Telethon gives up, and requests it cancels are retried rather than reported as a user pause.
   - [x] **DC Routing**: Same-DC files use the main connection (no `DC_ID_INVALID` socket leak); dead exported senders are evicted.

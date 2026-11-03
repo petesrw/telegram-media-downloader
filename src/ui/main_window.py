@@ -718,7 +718,7 @@ class MainWindow(QMainWindow):
                     # Files the user removed from this task must not come back
                     removed = set(task_data.get("skipped_ids") or [])
                     existing_ids = [
-                        mid for mid in task_data.get("selected_message_ids", [])
+                        mid for mid in task_data.get("selected_message_ids") or []
                         if mid not in removed
                     ]
             except: pass

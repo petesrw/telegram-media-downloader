@@ -833,6 +833,41 @@ class TestSkippedFilesPersistence(unittest.TestCase):
         database.save_task_db(tasks[0])
         self.assertEqual(database.load_active_tasks_db()[0]["skipped_ids"], [42])
 
+    def test_whole_category_task_reloads_without_a_selection(self):
+        # A whole-category task has no selection (None). It used to come back
+        # as [], so the worker fetched zero messages after a restart and
+        # declared the unfinished task complete.
+        database.save_task_db({
+            "channel_input": "-100123",
+            "media_id": 2,
+            "title": "Channel: test",
+            "selected_message_ids": None,
+        })
+
+        tasks = database.load_active_tasks_db()
+        self.assertIsNone(tasks[0]["selected_message_ids"])
+        self.assertIsNone(database.get_task_db("-100123", 2)["selected_message_ids"])
+
+        # Re-saving the loaded task must keep it a whole-category task
+        database.save_task_db(tasks[0])
+        self.assertIsNone(database.load_active_tasks_db()[0]["selected_message_ids"])
+
+    def test_rows_saved_with_an_empty_selection_reload_as_whole_category(self):
+        # Rows written by earlier versions store "[]" for whole-category tasks
+        database.save_task_db({"channel_input": "-100123", "media_id": 2, "title": "t"})
+
+        self.assertIsNone(database.load_active_tasks_db()[0]["selected_message_ids"])
+
+    def test_selected_files_survive_a_save_and_load(self):
+        database.save_task_db({
+            "channel_input": "-100123",
+            "media_id": 6,
+            "title": "t",
+            "selected_message_ids": [7, 8],
+        })
+
+        self.assertEqual(database.load_active_tasks_db()[0]["selected_message_ids"], [7, 8])
+
     def test_skip_reports_when_no_task_row_matches(self):
         # The caller logs a warning in this case instead of silently losing it
         self.assertEqual(database.add_task_skipped_id("999_6", 5), 0)

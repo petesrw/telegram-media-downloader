@@ -100,7 +100,9 @@ def save_task_db(task):
     if not task_id or "t.me/" in task_id or " " in task_id:
         task_id = f"{ch_key}_{topic_id}_{media_id}" if topic_id else f"{ch_key}_{media_id}"
     
-    selected_json = json.dumps(task.get("selected_message_ids", []))
+    # NULL means a whole-category task; [] would read back as "nothing selected"
+    selected = task.get("selected_message_ids")
+    selected_json = json.dumps(selected) if selected else None
     skipped_list = task.get("skipped_ids") or []
     skipped_json = json.dumps(sorted({int(m) for m in skipped_list}))
     
@@ -158,6 +160,14 @@ def _parse_id_list(raw):
     except Exception:
         return []
 
+def _parse_selection(raw):
+    """None for a whole-category task, else the selected message IDs.
+
+    Older rows store "[]" for whole-category tasks; an empty selection is
+    never saved on purpose, so it also means "download everything".
+    """
+    return _parse_id_list(raw) or None
+
 def load_active_tasks_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -169,7 +179,7 @@ def load_active_tasks_db():
     for r in rows:
         t = dict(r)
         t["paused"] = bool(t["paused"])
-        t["selected_message_ids"] = _parse_id_list(t.get("selected_ids"))
+        t["selected_message_ids"] = _parse_selection(t.get("selected_ids"))
         t["skipped_ids"] = _parse_id_list(t.get("skipped_ids"))
         tasks.append(t)
     
@@ -187,7 +197,7 @@ def get_task_db(ch_input, media_id=6):
     conn.close()
     if row:
         t = dict(row)
-        t["selected_message_ids"] = _parse_id_list(t.get("selected_ids"))
+        t["selected_message_ids"] = _parse_selection(t.get("selected_ids"))
         t["skipped_ids"] = _parse_id_list(t.get("skipped_ids"))
         return t
     return None
