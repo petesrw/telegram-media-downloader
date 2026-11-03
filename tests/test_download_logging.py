@@ -635,6 +635,21 @@ class TestDeletedOnTelegramLabel(unittest.TestCase):
     def _deleted_reason(self):
         return f"{al.DELETED_ON_TELEGRAM} - the message was deleted from the chat"
 
+    def test_batch_progress_percent_uses_western_digits(self):
+        # Windows set to Thai digits made the bar read "๖๙%" while the status
+        # bar showed "69.1%". The system locale reproduces it on such machines.
+        from PySide6.QtCore import QLocale
+
+        previous = QLocale()
+        QLocale.setDefault(QLocale.system())
+        try:
+            card = self._card()
+            card.batch_progress_bar.setRange(0, 100)
+            card.batch_progress_bar.setValue(69)
+            self.assertEqual(card.batch_progress_bar.text(), "69%")
+        finally:
+            QLocale.setDefault(previous)
+
     def test_deleted_file_row_is_labelled_not_failed(self):
         card = self._card()
         card.mark_file_failed(1, self._deleted_reason())

@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QProgressBar, QSizePolicy, QFrame, QScrollArea
 )
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QLocale
 import os
 
 from utils.app_logger import DELETED_ON_TELEGRAM, is_deleted_on_telegram
@@ -102,6 +102,8 @@ class DownloadCard(QWidget):
         self.batch_progress_bar.setFixedHeight(20)
         self.batch_progress_bar.setAlignment(Qt.AlignCenter)
         self.batch_progress_bar.setFormat("%p%")
+        # Match the status bar's Western digits even when Windows uses native ones
+        self.batch_progress_bar.setLocale(QLocale.c())
         self.batch_progress_bar.setMaximum(max(self.total_items, 1))
         self.batch_progress_bar.setValue(self.completed)
         self.batch_progress_bar.setProperty("state", "active")
