@@ -643,6 +643,98 @@ class TestParallelFailureKeepsPartialDownload(unittest.TestCase):
         self.assertEqual(len(fallback_calls), 1)
 
 
+class TestDroppedConnection(unittest.TestCase):
+    """At 15:55 on 2026-11-03 Telethon gave up on its connection: every queued
+    file logged "cancelled/paused by user" (nobody paused) and every later one
+    failed with "Cannot send requests while disconnected" until a restart.
+    """
+
+    SIZE = 5 * 1024 * 1024
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_filename = cd.get_media_filename
+        self.orig_peer = sys.modules["telethon.utils"].get_peer_id
+        self.orig_fast = cd.fast_download_file
+        self.orig_sleep = cd.asyncio.sleep
+        cd.get_media_filename = lambda *a, **k: "file.mp4"
+        sys.modules["telethon.utils"].get_peer_id = lambda channel: -100123
+        real_sleep = self.orig_sleep
+
+        async def no_sleep(_seconds):
+            await real_sleep(0)
+
+        cd.asyncio.sleep = no_sleep
+
+    def tearDown(self):
+        cd.get_media_filename = self.orig_filename
+        sys.modules["telethon.utils"].get_peer_id = self.orig_peer
+        cd.fast_download_file = self.orig_fast
+        cd.asyncio.sleep = self.orig_sleep
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _download(self, first_failure, client):
+        calls = []
+
+        async def fast_download(**kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise first_failure
+            with open(kwargs["target_path"], "wb") as handle:
+                handle.write(b"x" * self.SIZE)
+            return True
+
+        cd.fast_download_file = fast_download
+        results = []
+
+        def complete_cb(msg_id, paused=False, filepath=None, error=False, reason=None):
+            results.append({"paused": paused, "filepath": filepath, "error": error})
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cd.download_single_file(
+                client=client,
+                channel=object(),
+                message=MockMessage(7, size=self.SIZE),
+                folder_name=self.temp_dir,
+                complete_cb=complete_cb,
+            ))
+        finally:
+            loop.close()
+        return calls, results
+
+    class Client:
+        def __init__(self, connected=True):
+            self.connected = connected
+            self.connect_calls = 0
+
+        def is_connected(self):
+            return self.connected
+
+        async def connect(self):
+            self.connect_calls += 1
+            self.connected = True
+
+        async def get_messages(self, channel, ids=None):
+            return None
+
+    def test_request_cancelled_by_telethon_is_retried_not_reported_as_pause(self):
+        calls, results = self._download(asyncio.CancelledError(), self.Client())
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["paused"], "nobody paused this download")
+        self.assertTrue(results[0]["filepath"])
+
+    def test_dropped_client_is_reconnected_before_retrying(self):
+        client = self.Client(connected=False)
+        calls, results = self._download(ConnectionError("Cannot send requests while disconnected"), client)
+
+        self.assertEqual(client.connect_calls, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(results[0]["filepath"])
+
+
 class TestDeletedOnTelegramLabel(unittest.TestCase):
     """Files Telegram no longer has get their own label, not a red failure."""
 

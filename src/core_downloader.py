@@ -22,7 +22,10 @@ from telethon.tl.types import (
 )
 from database import save_task_db, load_active_tasks_db, remove_task_db, cache_media_list, mark_media_completed, get_completed_state_db
 from utils.file_utils import get_media_filename
-from utils.fast_telethon import fast_download_file, _atomic_finalize_sync, GLOBAL_FLOODGATE
+from utils.fast_telethon import (
+    fast_download_file, _atomic_finalize_sync, GLOBAL_FLOODGATE,
+    CONNECTION_DROPPED, cancelled_on_purpose, reconnect_client,
+)
 from utils.app_logger import log_event, describe_download_error, DELETED_ON_TELEGRAM, is_deleted_on_telegram
 
 # Watchdog defaults (overridable in Settings). A download that produces no
@@ -827,6 +830,8 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     if complete_cb: complete_cb(message.id, paused=True, filepath=None)
                     return
                 except Exception as fast_err:
+                    if isinstance(fast_err, ConnectionError) and client:
+                        await reconnect_client(client)
                     if _has_saved_chunks(expected_filepath, file_size):
                         # Telethon's fallback restarts from byte 0 straight into the
                         # final file, discarding the chunks in .part. Let the retry
@@ -965,9 +970,21 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                 # The stall watchdog cancelled us: this is a failure with a reason,
                 # not a user pause, so report it as such.
                 fail(message.id, abort_reason[0])
-            else:
+            elif cancelled_on_purpose(cancel_event):
                 log_event("INFO", f"message {message.id}: cancelled/paused by user")
                 if complete_cb: complete_cb(message.id, paused=True, filepath=None)
+            elif attempt < max_retries - 1:
+                # Telethon cancels in-flight requests when its connection gives up
+                log_event(
+                    "WARNING",
+                    f"message {message.id}: {CONNECTION_DROPPED} - retrying "
+                    f"(attempt {attempt+1}/{max_retries})",
+                )
+                if client:
+                    await reconnect_client(client)
+                continue
+            else:
+                fail(message.id, f"Failed after {max_retries} attempts - {CONNECTION_DROPPED}")
             break
         except Exception as e:
             reason = describe_download_error(e)
@@ -981,6 +998,8 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     break
                 if refreshed is not None:
                     message = refreshed
+            if isinstance(e, ConnectionError) and client:
+                await reconnect_client(client)
             if attempt < max_retries - 1:
                 wait_time = getattr(e, 'seconds', 2)
                 log_event(

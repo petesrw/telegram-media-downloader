@@ -171,6 +171,69 @@ class TestDcRouting(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_request_cancelled_by_telethon_is_retried_not_treated_as_pause(self):
+        # When Telethon's reconnect gives up it cancels every in-flight request.
+        # That CancelledError is not ours: the task was not cancelled and the
+        # user did not pause, so it must be retried like a connection error.
+        class CancelsOnce(RoutingClient):
+            async def __call__(self, req):
+                self.main_calls += 1
+                if self.main_calls == 1:
+                    raise asyncio.CancelledError()
+                return _result(b"M" * req.limit)
+
+        client = CancelsOnce(home_dc=5, senders=[])
+
+        data = self.run_async(_download_part(client, MockInputLocation(), 0, 1024, dc_id=5))
+
+        self.assertEqual(data, b"M" * 1024)
+        self.assertEqual(client.main_calls, 2)
+
+    def test_user_pause_still_cancels(self):
+        client = RoutingClient(home_dc=5, senders=[])
+        paused = asyncio.Event()
+        paused.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            self.run_async(_download_part(client, MockInputLocation(), 0, 1024, dc_id=5, cancel_event=paused))
+        self.assertEqual(client.main_calls, 0)
+
+    def test_dropped_main_connection_is_reconnected_once(self):
+        # Telethon gives up reconnecting after a few seconds and never tries
+        # again, so every later request fails with "Cannot send requests while
+        # disconnected" until someone calls connect().
+        class DroppedClient(RoutingClient):
+            def __init__(self):
+                super().__init__(home_dc=5, senders=[])
+                self.connected = False
+                self.connect_calls = 0
+
+            def is_connected(self):
+                return self.connected
+
+            async def connect(self):
+                self.connect_calls += 1
+                await asyncio.sleep(0)
+                self.connected = True
+
+            async def __call__(self, req):
+                if not self.connected:
+                    raise ConnectionError("Cannot send requests while disconnected")
+                return _result(b"M" * req.limit)
+
+        client = DroppedClient()
+
+        async def several_workers():
+            return await asyncio.gather(*[
+                _download_part(client, MockInputLocation(), i * 1024, 1024, dc_id=5)
+                for i in range(4)
+            ])
+
+        chunks = self.run_async(several_workers())
+
+        self.assertEqual(chunks, [b"M" * 1024] * 4)
+        self.assertEqual(client.connect_calls, 1, "workers must share one reconnect")
+
     def test_eviction_leaves_a_newer_cached_sender_alone(self):
         # Another worker may already have replaced the dead sender.
         dead = DisconnectedSender()

@@ -268,6 +268,53 @@ async def _evict_exported_sender(client, dc_id, sender):
         pass
 
 
+CONNECTION_DROPPED = "Telegram dropped the connection and cancelled the request"
+
+
+def cancelled_on_purpose(cancel_event=None):
+    """True when a CancelledError comes from a pause or a cancel of this task.
+
+    Telethon also cancels every in-flight request when its own reconnect gives
+    up; that one reaches us as CancelledError too, but nobody asked to stop.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        return True
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
+async def reconnect_client(client):
+    """Reconnects the main client after Telethon gave up on its connection.
+
+    Telethon retries a dropped connection a few times over a few seconds, then
+    stops for good: every later request fails with "Cannot send requests while
+    disconnected" until connect() is called. Concurrent callers share one
+    attempt. Returns True when the client is connected afterwards.
+    """
+    is_connected = getattr(client, "is_connected", None)
+    if is_connected is None or is_connected():
+        return True
+
+    lock = getattr(client, "_tgdl_reconnect_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        client._tgdl_reconnect_lock = lock
+
+    async with lock:
+        if client.is_connected():
+            return True
+        log_event("WARNING", "lost the connection to Telegram; reconnecting")
+        try:
+            await client.connect()
+        except Exception as e:
+            log_event("ERROR", f"reconnect to Telegram failed: {describe_download_error(e)} ({e})")
+            return False
+        connected = client.is_connected()
+        if connected:
+            log_event("INFO", "reconnected to Telegram")
+        return connected
+
+
 async def _download_part(client, location, offset, limit, dc_id=None, gate=None, cancel_event=None):
     """Fetches a single chunk from Telegram with timeout, proactive gating and retries.
 
@@ -283,9 +330,10 @@ async def _download_part(client, location, offset, limit, dc_id=None, gate=None,
             if not allowed:
                 raise asyncio.CancelledError()
 
+        uses_exported_sender = _needs_exported_sender(client, dc_id)
         try:
             req = GetFileRequest(location=location, offset=offset, limit=limit)
-            if _needs_exported_sender(client, dc_id):
+            if uses_exported_sender:
                 sender = await asyncio.wait_for(
                     client._borrow_exported_sender(dc_id), timeout=SENDER_BORROW_TIMEOUT
                 )
@@ -306,44 +354,53 @@ async def _download_part(client, location, offset, limit, dc_id=None, gate=None,
 
             return result.bytes if result else b""
         except asyncio.CancelledError:
-            raise
+            if cancelled_on_purpose(cancel_event):
+                raise
+            error = ConnectionError(CONNECTION_DROPPED)
         except Exception as e:
-            last_attempt = attempt >= CHUNK_MAX_ATTEMPTS - 1
-            reason = describe_download_error(e)
-            if "FileReference" in type(e).__name__ or "FilerefUpgrade" in type(e).__name__:
-                # The stale reference is part of `location`, so retrying here
-                # can never succeed; the caller must re-fetch the message.
-                log_event("WARNING", f"chunk @{offset}: {reason}")
-                raise e
-            if last_attempt:
-                log_event(
-                    "ERROR",
-                    f"chunk @{offset} ({limit} bytes) failed after "
-                    f"{CHUNK_MAX_ATTEMPTS} attempts: {reason} ({e})",
-                )
-                raise e
+            error = e
 
-            from telethon.errors import FloodWaitError
+        e = error
+        if isinstance(e, ConnectionError) and not uses_exported_sender:
+            # Exported senders are evicted above; the main client must be reconnected
+            await reconnect_client(client)
 
-            if isinstance(e, FloodWaitError):
-                wait = getattr(e, 'seconds', 1.0)
-                if gate:
-                    gate.trip(wait)
-                log_event(
-                    "WARNING",
-                    f"chunk @{offset}: FloodWait {wait}s, waiting "
-                    f"(attempt {attempt + 1}/{CHUNK_MAX_ATTEMPTS})",
-                )
-                await asyncio.sleep(wait + 1.0)
-            else:
-                wait = getattr(e, 'seconds', 1.0)
-                backoff = min(wait, 3.0)
-                log_event(
-                    "WARNING",
-                    f"chunk @{offset}: {reason} - retrying in {backoff}s "
-                    f"(attempt {attempt + 1}/{CHUNK_MAX_ATTEMPTS})",
-                )
-                await asyncio.sleep(backoff)
+        last_attempt = attempt >= CHUNK_MAX_ATTEMPTS - 1
+        reason = describe_download_error(e)
+        if "FileReference" in type(e).__name__ or "FilerefUpgrade" in type(e).__name__:
+            # The stale reference is part of `location`, so retrying here
+            # can never succeed; the caller must re-fetch the message.
+            log_event("WARNING", f"chunk @{offset}: {reason}")
+            raise e
+        if last_attempt:
+            log_event(
+                "ERROR",
+                f"chunk @{offset} ({limit} bytes) failed after "
+                f"{CHUNK_MAX_ATTEMPTS} attempts: {reason} ({e})",
+            )
+            raise e
+
+        from telethon.errors import FloodWaitError
+
+        if isinstance(e, FloodWaitError):
+            wait = getattr(e, 'seconds', 1.0)
+            if gate:
+                gate.trip(wait)
+            log_event(
+                "WARNING",
+                f"chunk @{offset}: FloodWait {wait}s, waiting "
+                f"(attempt {attempt + 1}/{CHUNK_MAX_ATTEMPTS})",
+            )
+            await asyncio.sleep(wait + 1.0)
+        else:
+            wait = getattr(e, 'seconds', 1.0)
+            backoff = min(wait, 3.0)
+            log_event(
+                "WARNING",
+                f"chunk @{offset}: {reason} - retrying in {backoff}s "
+                f"(attempt {attempt + 1}/{CHUNK_MAX_ATTEMPTS})",
+            )
+            await asyncio.sleep(backoff)
 
 
 async def fast_download_file(client, location, target_path, file_size, dc_id=None, progress_callback=None, cancel_event=None, workers=4, gate=None):
