@@ -42,7 +42,13 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.0
+- **Current Version**: 2.9.1
+- **Completed in v2.9.1**:
+  - [x] **Resume After Stalls/Timeouts**: Watchdog cancels and chunk timeouts keep `.part` progress instead of restarting through the single-stream fallback.
+  - [x] **Automatic Reconnect**: The main client reconnects after Telethon gives up, and requests it cancels are retried rather than reported as a user pause.
+  - [x] **DC Routing**: Same-DC files use the main connection (no `DC_ID_INVALID` socket leak); dead exported senders are evicted.
+  - [x] **Deleted on Telegram**: Deleted messages and removed media fail once with their own label.
+  - [x] **UI**: Western digits on the progress bar; Logs tab shows each line once with its level.
 - **Completed in v2.9.0**:
   - [x] **Download Diagnostics**: Failures now carry a reason (rate limit, timeout, access lost, disk full, ...) instead of being swallowed by a `print()` that a windowed build never shows.
   - [x] **Stall Watchdog**: Files with no progress are flagged as Stalled (45s default) and stalled attempts are cancelled after 180s so they release their concurrency slot instead of hanging the queue.

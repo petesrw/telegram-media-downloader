@@ -161,6 +161,14 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.1
+- 🔁 **Resume From `.part` Instead Of Restarting**: A file the stall watchdog cancels, or whose chunks keep timing out, now keeps its downloaded chunks and resumes from them. Before, it fell back to a single-stream download from byte 0 straight into the final file.
+- 🔌 **Automatic Reconnect**: Telethon stops retrying a dropped connection after a few seconds. The app now reconnects by itself, instead of failing every remaining file with "Cannot send requests while disconnected" until a restart. Requests that Telethon cancels on a dropped connection are retried, and are no longer logged as "cancelled/paused by user".
+- 🛰️ **Same-DC Downloads Use The Main Connection**: Files on the account's own data centre no longer export authorization to it. That export failed with `DC_ID_INVALID` and leaked a socket on every attempt. A dead connection to another DC is dropped and rebuilt instead of being reused.
+- 🗑️ **"Deleted on Telegram" Label**: Media whose message was deleted, or whose media was removed from the post, fails once with a grey label instead of retrying and crashing with `'NoneType' object has no attribute 'media'`.
+- 🔢 **Western Digits On The Progress Bar**: The task progress bar showed "๖๙%" on Windows set to Thai digits. It now shows "69%", matching the status bar.
+- 🗒️ **Logs Tab Fixes**: Each line appears once, not twice. Lines recorded before the tab opened keep their level and colour, and the level filter applies to them.
+
 ### v2.9.0
 - 🗒️ **Diagnostics Log Tab & `downloader.log`**: Added a new **Logs** view in the sidebar that streams every download failure, stall warning and retry with a timestamp, plus a filter (all / warnings / errors), auto-scroll, and a button to open the rotating log file (`downloader.log`, 5 MB × 3 files).
 - 🔍 **Failure Reasons Instead Of Silent Hangs**: Failures are no longer swallowed. Each item now reports *why* it failed (rate limit, network timeout, lost access, disk full, expired file reference, ...), shown on the file row, on the task card and in the log. The packaged build previously discarded every diagnostic because it runs without a console.
