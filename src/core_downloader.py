@@ -23,7 +23,7 @@ from telethon.tl.types import (
 from database import save_task_db, load_active_tasks_db, remove_task_db, cache_media_list, mark_media_completed, get_completed_state_db
 from utils.file_utils import get_media_filename
 from utils.fast_telethon import fast_download_file, _atomic_finalize_sync, GLOBAL_FLOODGATE
-from utils.app_logger import log_event, describe_download_error
+from utils.app_logger import log_event, describe_download_error, DELETED_ON_TELEGRAM, is_deleted_on_telegram
 
 # Watchdog defaults (overridable in Settings). A download that produces no
 # progress for STALL_WARN seconds is reported as stalled; one that stays idle
@@ -462,6 +462,31 @@ def get_unique_filepath(folder, filename, reserved_paths=None):
 
     return new_filepath
 
+def _is_file_reference_error(exc):
+    name = type(exc).__name__
+    return "FileReference" in name or "FilerefUpgrade" in name
+
+
+async def _refetch_message(client, channel, message):
+    """Re-fetches `message` for a fresh file reference.
+
+    Returns (fresh_message, gone_reason). gone_reason is set when Telegram no
+    longer serves the media at all - the message was deleted, or its media was
+    removed - since no retry can download it then. A lookup error returns
+    (None, None) so the normal retry path decides.
+    """
+    try:
+        fresh = await client.get_messages(channel, ids=message.id)
+    except Exception as e:
+        log_event("WARNING", f"message {message.id}: could not re-fetch - {describe_download_error(e)}")
+        return None, None
+    if fresh is None:
+        return None, f"{DELETED_ON_TELEGRAM} - the message was deleted from the chat"
+    if getattr(fresh, "media", None) is None:
+        return None, f"{DELETED_ON_TELEGRAM} - the media was removed from the post"
+    return fresh, None
+
+
 async def download_single_file(client, channel, message, folder_name, progress_cb=None, complete_cb=None, cancel_event=None, max_speed_kb=None, reserved_paths=None, stall_cb=None):
     from ui.views.settings_view import load_config
     cfg = load_config()
@@ -487,7 +512,7 @@ async def download_single_file(client, channel, message, folder_name, progress_c
 
     def fail(msg_id, reason):
         """Report a failure together with the reason it happened."""
-        log_event("ERROR", f"message {msg_id}: {reason}")
+        log_event("WARNING" if is_deleted_on_telegram(reason) else "ERROR", f"message {msg_id}: {reason}")
         if complete_cb:
             complete_cb(msg_id, paused=False, filepath=None, error=True, reason=reason)
 
@@ -791,6 +816,16 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     if complete_cb: complete_cb(message.id, paused=True, filepath=None)
                     return
                 except Exception as fast_err:
+                    if client and channel and _is_file_reference_error(fast_err):
+                        # Telethon's fallback would re-fetch too, but crashes with
+                        # "'NoneType' object has no attribute 'media'" when the
+                        # message is gone; check first and hand it a fresh message.
+                        refreshed, gone_reason = await _refetch_message(client, channel, message)
+                        if gone_reason:
+                            fail(message.id, gone_reason)
+                            break
+                        if refreshed is not None:
+                            message = refreshed
                     log_event(
                         "WARNING",
                         f"message {message.id}: parallel engine failed, using Telethon "
@@ -918,6 +953,13 @@ async def download_single_file(client, channel, message, folder_name, progress_c
             from telethon.errors import FloodWaitError
             if isinstance(e, FloodWaitError):
                 GLOBAL_FLOODGATE.trip(getattr(e, 'seconds', 2))
+            if client and channel and _is_file_reference_error(e):
+                refreshed, gone_reason = await _refetch_message(client, channel, message)
+                if gone_reason:
+                    fail(message.id, gone_reason)
+                    break
+                if refreshed is not None:
+                    message = refreshed
             if attempt < max_retries - 1:
                 wait_time = getattr(e, 'seconds', 2)
                 log_event(

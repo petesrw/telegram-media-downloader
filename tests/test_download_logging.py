@@ -427,6 +427,150 @@ class TestFailureReasons(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
+class TestMediaGoneFromTelegram(unittest.TestCase):
+    """A deleted message (or one whose media was removed) can never download.
+
+    Refreshing the expired file reference is how this shows up: Telegram
+    returns None (deleted) or a message without media. It must fail at once
+    with that reason, not retry and end in "'NoneType' object has no attribute
+    'media'".
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_filename = cd.get_media_filename
+        self.orig_peer = sys.modules["telethon.utils"].get_peer_id
+        cd.get_media_filename = lambda *a, **k: "file.mp4"
+        sys.modules["telethon.utils"].get_peer_id = lambda channel: -100123
+
+    def tearDown(self):
+        cd.get_media_filename = self.orig_filename
+        sys.modules["telethon.utils"].get_peer_id = self.orig_peer
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _download(self, refetched, size=100):
+        from telethon.errors import FileReferenceExpiredError
+
+        calls = []
+
+        class ExpiredMessage(MockMessage):
+            async def download_media(self, file=None, progress_callback=None):
+                calls.append(self.id)
+                raise FileReferenceExpiredError(request=None)
+
+        class Client:
+            async def get_messages(self, channel, ids=None):
+                return refetched
+
+        results = []
+
+        def complete_cb(msg_id, paused=False, filepath=None, error=False, reason=None):
+            results.append({"error": error, "reason": reason})
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cd.download_single_file(
+                client=Client(),
+                channel=object(),
+                message=ExpiredMessage(7, size=size),
+                folder_name=self.temp_dir,
+                complete_cb=complete_cb,
+            ))
+        finally:
+            loop.close()
+        return calls, results
+
+    def test_deleted_message_fails_once_with_a_clear_reason(self):
+        calls, results = self._download(refetched=None)
+
+        self.assertEqual(calls, [7], "a deleted message must not be retried")
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["error"])
+        self.assertTrue(al.is_deleted_on_telegram(results[0]["reason"]))
+        self.assertIn("message was deleted", results[0]["reason"])
+
+    def test_parallel_engine_expiry_does_not_fall_back_for_a_deleted_message(self):
+        # Large files hit the expired reference in the parallel engine first;
+        # Telethon's fallback must not be tried on a message that is gone.
+        from telethon.errors import FileReferenceExpiredError
+
+        async def expired_fast_download(**kwargs):
+            raise FileReferenceExpiredError(request=None)
+
+        orig_fast = cd.fast_download_file
+        cd.fast_download_file = expired_fast_download
+        try:
+            calls, results = self._download(refetched=None, size=5 * 1024 * 1024)
+        finally:
+            cd.fast_download_file = orig_fast
+
+        self.assertEqual(calls, [], "Telethon fallback must not run for a deleted message")
+        self.assertEqual(len(results), 1)
+        self.assertTrue(al.is_deleted_on_telegram(results[0]["reason"]))
+
+    def test_message_without_media_fails_once_with_a_clear_reason(self):
+        calls, results = self._download(refetched=MockMessage(7))
+
+        self.assertEqual(calls, [7])
+        self.assertEqual(len(results), 1)
+        self.assertTrue(al.is_deleted_on_telegram(results[0]["reason"]))
+        self.assertIn("media was removed", results[0]["reason"])
+
+    def test_ordinary_failures_are_not_labelled_deleted(self):
+        self.assertFalse(al.is_deleted_on_telegram("Network timeout - Telegram did not answer in time"))
+        self.assertFalse(al.is_deleted_on_telegram(None))
+
+
+class TestDeletedOnTelegramLabel(unittest.TestCase):
+    """Files Telegram no longer has get their own label, not a red failure."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        if not al._QT_AVAILABLE:
+            raise unittest.SkipTest("PySide6 is not installed")
+
+        from PySide6.QtWidgets import QApplication
+
+        cls._app = QApplication.instance() or QApplication([])
+
+    def _card(self):
+        from ui.components.download_card import DownloadCard
+
+        files = [
+            {"id": 1, "name": "a.mp4", "size": 10},
+            {"id": 2, "name": "b.mp4", "size": 10},
+        ]
+        return DownloadCard("t1", "K.27.1", 2, "folder", "all", None, files_metadata=files)
+
+    def _deleted_reason(self):
+        return f"{al.DELETED_ON_TELEGRAM} - the message was deleted from the chat"
+
+    def test_deleted_file_row_is_labelled_not_failed(self):
+        card = self._card()
+        card.mark_file_failed(1, self._deleted_reason())
+
+        row = card.file_rows[1]
+        self.assertEqual(row.icon.text(), "🗑️")
+        self.assertEqual(row.bar.property("state"), "deleted")
+        self.assertTrue(row.lbl_reason.text().startswith(al.DELETED_ON_TELEGRAM))
+        self.assertEqual(card.failed_count, 0)
+        self.assertEqual(card.deleted_count, 1)
+        self.assertEqual(card.lbl_status_text.text(), f"{al.DELETED_ON_TELEGRAM}: 1")
+        self.assertEqual(card.lbl_status_text.property("state"), "deleted")
+
+    def test_real_failures_keep_the_failed_badge(self):
+        card = self._card()
+        card.mark_file_failed(1, "Network timeout - Telegram did not answer in time")
+        card.mark_file_failed(2, self._deleted_reason())
+
+        self.assertEqual(card.failed_count, 1)
+        self.assertEqual(card.deleted_count, 1)
+        self.assertEqual(card.lbl_status_text.property("state"), "failed")
+        self.assertEqual(card.file_rows[1].icon.text(), "❌")
+        self.assertEqual(card.file_rows[2].icon.text(), "🗑️")
+
+
 class TestSkippedFilesPersistence(unittest.TestCase):
 
     def setUp(self):

@@ -5,6 +5,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QSize
 import os
 
+from utils.app_logger import DELETED_ON_TELEGRAM, is_deleted_on_telegram
+
 # Styles are now moved to dark_style.qss and style.qss
 
 
@@ -126,6 +128,7 @@ class DownloadCard(QWidget):
         rc.addWidget(self.lbl_reason)
 
         self.failed_count = 0
+        self.deleted_count = 0
 
         # row 4 – action buttons
         ar = QHBoxLayout()
@@ -356,12 +359,26 @@ class DownloadCard(QWidget):
 
     def mark_file_failed(self, msg_id, reason):
         """Show that one file could not be downloaded, and why."""
+        if is_deleted_on_telegram(reason):
+            self.mark_file_deleted(msg_id, reason)
+            return
         self.failed_count += 1
         self._show_reason(f"❌ File {msg_id} failed: {reason}", "#EF4444")
         self._refresh_status_badge("failed", f"Failed: {self.failed_count}")
         row = self.file_rows.get(msg_id)
         if row:
             row.set_failed(reason)
+
+    def mark_file_deleted(self, msg_id, reason):
+        """Label a file Telegram no longer has; a retry cannot bring it back."""
+        self.deleted_count += 1
+        self._show_reason(f"🗑️ File {msg_id}: {reason}", "#9CA3AF")
+        if self.failed_count == 0:
+            # Real failures need attention more, so they keep the badge
+            self._refresh_status_badge("deleted", f"{DELETED_ON_TELEGRAM}: {self.deleted_count}")
+        row = self.file_rows.get(msg_id)
+        if row:
+            row.set_deleted(reason)
 
     def mark_file_stalled(self, msg_id, reason):
         """Show that a file stopped making progress, with the last known state."""
@@ -389,6 +406,7 @@ class DownloadCard(QWidget):
         self.files_metadata = [m for m in self.files_metadata if m.get("id") != msg_id]
         self.lbl_reason.setVisible(False)
         self.failed_count = 0
+        self.deleted_count = 0
 
         # A removed item is no longer pending work
         self.total_items = max(0, self.total_items - 1)
@@ -674,6 +692,14 @@ class FileRow(QWidget):
         self.bar.style().polish(self.bar)
         self.icon.setText("❌")
         self._set_reason(reason, "#EF4444")
+
+    def set_deleted(self, reason):
+        """Icon + label for a file Telegram no longer has."""
+        self.bar.setProperty("state", "deleted")
+        self.bar.style().unpolish(self.bar)
+        self.bar.style().polish(self.bar)
+        self.icon.setText("🗑️")
+        self._set_reason(reason, "#9CA3AF")
 
     def set_stalled(self, reason):
         """Icon + tooltip for a file that stopped making progress."""

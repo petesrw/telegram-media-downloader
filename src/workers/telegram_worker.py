@@ -18,7 +18,7 @@ from core_downloader import (
 )
 from utils.file_utils import get_media_filename
 from resource_utils import get_project_root
-from utils.app_logger import log_event
+from utils.app_logger import log_event, is_deleted_on_telegram
 
 class WorkerSignals(QObject):
     # Auth Signals
@@ -847,7 +847,9 @@ class TelegramWorker(QThread):
                 if error:
                     # Report the reason instead of silently leaving the row pending
                     text = reason or "Unknown error"
-                    log_event("ERROR", f"[{title}] file {msg_id} failed: {text}")
+                    # Media Telegram no longer has is not an app error
+                    level = "WARNING" if is_deleted_on_telegram(text) else "ERROR"
+                    log_event(level, f"[{title}] file {msg_id} failed: {text}")
                     self.signals.file_failed.emit(task_id, msg_id, text)
                     return
                 if not paused:

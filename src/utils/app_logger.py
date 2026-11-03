@@ -232,6 +232,15 @@ def clear_log_file() -> None:
         _RING.clear()
 
 
+# Failure reasons for media Telegram no longer serves start with this label,
+# so the UI can show them apart from errors a retry might fix.
+DELETED_ON_TELEGRAM = "Deleted on Telegram"
+
+
+def is_deleted_on_telegram(reason) -> bool:
+    return bool(reason) and str(reason).startswith(DELETED_ON_TELEGRAM)
+
+
 def describe_download_error(exc: BaseException) -> str:
     """Translate an exception into a short, user-facing reason for a failure."""
     name = type(exc).__name__

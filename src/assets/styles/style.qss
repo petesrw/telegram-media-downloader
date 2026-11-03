@@ -185,6 +185,11 @@ QLabel#StatusBadge[state="failed"] {
     background: #FEE2E2; /* Red-100 */
 }
 
+QLabel#StatusBadge[state="deleted"] {
+    color: #4B5563; /* Gray-600 */
+    background: #F3F4F6; /* Gray-100 */
+}
+
 QLabel#CardReason {
     font-size: 11px;
     padding: 2px 2px 0px 2px;
@@ -462,6 +467,7 @@ QProgressBar#FileProgressBar[state="active"]::chunk { background: #2BA5E4; }
 QProgressBar#FileProgressBar[state="completed"]::chunk { background: #10B981; }
 QProgressBar#FileProgressBar[state="stalled"]::chunk { background: #F59E0B; }
 QProgressBar#FileProgressBar[state="error"]::chunk { background: #EF4444; }
+QProgressBar#FileProgressBar[state="deleted"]::chunk { background: #9CA3AF; }
 
 /* Per-file failure reason shown under the filename */
 QLabel#FileRowReason {

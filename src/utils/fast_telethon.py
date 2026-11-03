@@ -310,6 +310,11 @@ async def _download_part(client, location, offset, limit, dc_id=None, gate=None,
         except Exception as e:
             last_attempt = attempt >= CHUNK_MAX_ATTEMPTS - 1
             reason = describe_download_error(e)
+            if "FileReference" in type(e).__name__ or "FilerefUpgrade" in type(e).__name__:
+                # The stale reference is part of `location`, so retrying here
+                # can never succeed; the caller must re-fetch the message.
+                log_event("WARNING", f"chunk @{offset}: {reason}")
+                raise e
             if last_attempt:
                 log_event(
                     "ERROR",

@@ -115,6 +115,22 @@ class TestDcRouting(unittest.TestCase):
         self.assertTrue(dead.disconnected)
         self.assertEqual(client.borrowed_dcs, [4, 4])
 
+    def test_expired_file_reference_is_not_retried_with_the_same_location(self):
+        # Retrying cannot help: the stale reference is baked into the location,
+        # so the caller has to re-fetch the message instead.
+        from telethon.errors import FileReferenceExpiredError
+
+        class ExpiredClient(RoutingClient):
+            async def __call__(self, req):
+                self.main_calls += 1
+                raise FileReferenceExpiredError(request=None)
+
+        client = ExpiredClient(home_dc=5, senders=[])
+
+        with self.assertRaises(FileReferenceExpiredError):
+            self.run_async(_download_part(client, MockInputLocation(), 0, 1024, dc_id=5))
+        self.assertEqual(client.main_calls, 1)
+
     def test_eviction_leaves_a_newer_cached_sender_alone(self):
         # Another worker may already have replaced the dead sender.
         dead = DisconnectedSender()
