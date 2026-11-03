@@ -467,6 +467,17 @@ def _is_file_reference_error(exc):
     return "FileReference" in name or "FilerefUpgrade" in name
 
 
+def _has_saved_chunks(filepath, file_size):
+    """True when the parallel engine left resumable chunks for `filepath`."""
+    from utils.fast_telethon import CHUNK_SIZE, _load_meta
+    import math
+
+    if not filepath or not file_size:
+        return False
+    total_parts = math.ceil(file_size / CHUNK_SIZE)
+    return bool(_load_meta(filepath + ".part.meta", file_size, total_parts))
+
+
 async def _refetch_message(client, channel, message):
     """Re-fetches `message` for a fresh file reference.
 
@@ -816,6 +827,16 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                     if complete_cb: complete_cb(message.id, paused=True, filepath=None)
                     return
                 except Exception as fast_err:
+                    if _has_saved_chunks(expected_filepath, file_size):
+                        # Telethon's fallback restarts from byte 0 straight into the
+                        # final file, discarding the chunks in .part. Let the retry
+                        # loop run the parallel engine again so it resumes instead.
+                        log_event(
+                            "WARNING",
+                            f"parallel download of {os.path.basename(expected_filepath)} failed with "
+                            f"saved progress; retrying it instead of the single-stream fallback",
+                        )
+                        raise
                     if client and channel and _is_file_reference_error(fast_err):
                         # Telethon's fallback would re-fetch too, but crashes with
                         # "'NoneType' object has no attribute 'media'" when the

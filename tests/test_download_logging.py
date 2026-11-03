@@ -521,6 +521,95 @@ class TestMediaGoneFromTelegram(unittest.TestCase):
         self.assertFalse(al.is_deleted_on_telegram(None))
 
 
+class TestParallelFailureKeepsPartialDownload(unittest.TestCase):
+    """When the parallel engine gives up after saving chunks, the next attempt
+    must resume from .part. Telethon's single-stream fallback starts from byte
+    0 and writes straight to the final path, throwing those chunks away.
+    """
+
+    SIZE = 5 * 1024 * 1024
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_filename = cd.get_media_filename
+        self.orig_peer = sys.modules["telethon.utils"].get_peer_id
+        self.orig_fast = cd.fast_download_file
+        self.orig_sleep = cd.asyncio.sleep
+        cd.get_media_filename = lambda *a, **k: "file.mp4"
+        sys.modules["telethon.utils"].get_peer_id = lambda channel: -100123
+
+        async def no_sleep(_seconds):
+            return None
+
+        cd.asyncio.sleep = no_sleep
+
+    def tearDown(self):
+        cd.get_media_filename = self.orig_filename
+        sys.modules["telethon.utils"].get_peer_id = self.orig_peer
+        cd.fast_download_file = self.orig_fast
+        cd.asyncio.sleep = self.orig_sleep
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _download(self, saved_chunks):
+        from utils.fast_telethon import CHUNK_SIZE, _save_meta
+        import math
+
+        fast_calls = []
+        fallback_calls = []
+
+        async def timing_out_fast_download(**kwargs):
+            fast_calls.append(kwargs["target_path"])
+            if saved_chunks:
+                total = math.ceil(self.SIZE / CHUNK_SIZE)
+                _save_meta(kwargs["target_path"] + ".part.meta", self.SIZE, CHUNK_SIZE, total, saved_chunks)
+            raise asyncio.TimeoutError()
+
+        cd.fast_download_file = timing_out_fast_download
+
+        class Message(MockMessage):
+            async def download_media(self, file=None, progress_callback=None):
+                fallback_calls.append(file)
+                return None
+
+        class Client:
+            async def get_messages(self, channel, ids=None):
+                return None
+
+        results = []
+
+        def complete_cb(msg_id, paused=False, filepath=None, error=False, reason=None):
+            results.append({"error": error, "reason": reason})
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cd.download_single_file(
+                client=Client(),
+                channel=object(),
+                message=Message(7, size=self.SIZE),
+                folder_name=self.temp_dir,
+                complete_cb=complete_cb,
+            ))
+        finally:
+            loop.close()
+        return fast_calls, fallback_calls, results
+
+    def test_timeout_with_saved_chunks_retries_the_parallel_engine(self):
+        fast_calls, fallback_calls, results = self._download(saved_chunks={0, 1, 2})
+
+        self.assertEqual(fallback_calls, [], "fallback would restart the file from byte 0")
+        self.assertEqual(len(fast_calls), 3, "each retry must resume through the parallel engine")
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["error"])
+        self.assertIn("Network timeout", results[0]["reason"])
+        self.assertTrue(os.path.exists(os.path.join(self.temp_dir, "file.mp4.part.meta")))
+
+    def test_timeout_before_any_chunk_still_uses_the_fallback(self):
+        fast_calls, fallback_calls, results = self._download(saved_chunks=set())
+
+        self.assertEqual(len(fast_calls), 1)
+        self.assertEqual(len(fallback_calls), 1)
+
+
 class TestDeletedOnTelegramLabel(unittest.TestCase):
     """Files Telegram no longer has get their own label, not a red failure."""
 

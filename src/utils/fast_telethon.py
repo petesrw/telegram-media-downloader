@@ -483,9 +483,14 @@ async def fast_download_file(client, location, target_path, file_size, dc_id=Non
         tasks = [asyncio.create_task(worker()) for _ in range(min(workers, len(missing_parts)))]
         await asyncio.gather(*tasks)
     except (DownloadCancelled, asyncio.CancelledError):
-        # User paused/cancelled: persist current meta for future resume
+        # Persist current meta so the next attempt resumes from these chunks
         _save_meta(meta_path, file_size, CHUNK_SIZE, total_parts, completed_parts)
-        return False
+        if cancel_event and cancel_event.is_set():
+            return False  # user pause
+        # Anything else (the stall watchdog, shutdown) cancelled the task itself.
+        # Swallowing it made the caller fall back to a single-stream download
+        # from byte 0 straight into the final file, ignoring the saved chunks.
+        raise
     except Exception as e:
         _save_meta(meta_path, file_size, CHUNK_SIZE, total_parts, completed_parts)
         done = len(completed_parts)

@@ -131,6 +131,46 @@ class TestDcRouting(unittest.TestCase):
             self.run_async(_download_part(client, MockInputLocation(), 0, 1024, dc_id=5))
         self.assertEqual(client.main_calls, 1)
 
+    def test_task_cancellation_propagates_and_keeps_progress(self):
+        # The stall watchdog cancels the download task. Swallowing that made the
+        # caller fall back to a single-stream download from byte 0 that wrote
+        # straight to the final file, ignoring the chunks already in .part.
+        import tempfile
+        import shutil
+        from utils.fast_telethon import fast_download_file, CHUNK_SIZE, _load_meta
+
+        ft.asyncio.sleep = self._orig_sleep
+        temp_dir = tempfile.mkdtemp()
+        target = os.path.join(temp_dir, "stalled.mp4")
+        first_chunk_done = asyncio.Event()
+
+        class HangsAfterFirstChunk(RoutingClient):
+            async def __call__(self, req):
+                if req.offset == 0:
+                    first_chunk_done.set()
+                    return _result(b"A" * req.limit)
+                await asyncio.Event().wait()  # Telegram never answers
+
+        async def scenario():
+            client = HangsAfterFirstChunk(home_dc=5, senders=[])
+            task = asyncio.create_task(fast_download_file(
+                client, MockInputLocation(), target, CHUNK_SIZE * 3, dc_id=5, workers=2,
+                gate=ft.DownloadFloodGate(),
+            ))
+            await first_chunk_done.wait()
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        try:
+            self.run_async(scenario())
+            self.assertFalse(os.path.exists(target), "nothing may be written to the final path")
+            saved = _load_meta(target + ".part.meta", CHUNK_SIZE * 3, 3)
+            self.assertEqual(saved, {0})
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_eviction_leaves_a_newer_cached_sender_alone(self):
         # Another worker may already have replaced the dead sender.
         dead = DisconnectedSender()
