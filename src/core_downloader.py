@@ -35,6 +35,22 @@ DEFAULT_STALL_WARN_SECONDS = 45
 DEFAULT_STALL_ABORT_SECONDS = 180
 STALL_POLL_SECONDS = 5.0
 
+def _describe_media(message):
+    """Short "media: <type>[, mime, size]" note for failures nobody can retry away."""
+    media = getattr(message, 'media', None)
+    if media is None:
+        return "media: none"
+    parts = [type(media).__name__]
+    document = getattr(media, 'document', None)
+    if document is not None:
+        mime = getattr(document, 'mime_type', None)
+        if mime:
+            parts.append(mime)
+        size = getattr(document, 'size', None)
+        if size:
+            parts.append(_fmt_bytes(size))
+    return "media: " + ", ".join(parts)
+
 def _fmt_bytes(size):
     try:
         size = float(size or 0)
@@ -926,7 +942,7 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                 fail(
                     message.id,
                     "Download produced no file - Telegram returned no data and the "
-                    "single-stream fallback failed",
+                    f"single-stream fallback failed ({_describe_media(message)})",
                 )
                 break
 

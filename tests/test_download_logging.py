@@ -415,6 +415,66 @@ class TestFailureReasons(unittest.TestCase):
         self.assertIn("telegram said no", results[-1]["reason"])
         self.assertIn("Failed after 3 attempts", results[-1]["reason"])
 
+    def _download_returning_nothing(self, media, size=100):
+        class NoDataMessage(MockMessage):
+            async def download_media(self, file=None, progress_callback=None):
+                return None
+
+        message = NoDataMessage(9, size=size)
+        message.media = media
+        results = []
+
+        def complete_cb(msg_id, paused=False, filepath=None, error=False, reason=None):
+            results.append({"error": error, "reason": reason})
+
+        orig_filename = cd.get_media_filename
+        orig_peer = sys.modules["telethon.utils"].get_peer_id
+        cd.get_media_filename = lambda *a, **k: "file.mp4"
+        sys.modules["telethon.utils"].get_peer_id = lambda channel: -100123
+        try:
+            self._run(cd.download_single_file(
+                client=None,
+                channel=object(),
+                message=message,
+                folder_name=self.temp_dir,
+                complete_cb=complete_cb,
+            ))
+        finally:
+            cd.get_media_filename = orig_filename
+            sys.modules["telethon.utils"].get_peer_id = orig_peer
+        return results
+
+    def test_no_file_reason_names_the_media_type(self):
+        # Some files fail on every run because Telethon cannot download their
+        # kind of media; the reason has to say which kind so the user can
+        # decide whether to remove them.
+        class MessageMediaWebPage:
+            pass
+
+        results = self._download_returning_nothing(MessageMediaWebPage())
+
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["error"])
+        self.assertIn("Download produced no file", results[0]["reason"])
+        self.assertIn("media: MessageMediaWebPage", results[0]["reason"])
+
+    def test_no_file_reason_includes_the_document_type_and_size(self):
+        class Document:
+            mime_type = "video/mp4"
+            size = 3 * 1024 * 1024
+
+        class MessageMediaDocument:
+            document = Document()
+
+        results = self._download_returning_nothing(MessageMediaDocument(), size=0)
+
+        self.assertIn("media: MessageMediaDocument, video/mp4, 3.0 MB", results[0]["reason"])
+
+    def test_no_file_reason_says_when_there_is_no_media(self):
+        results = self._download_returning_nothing(None)
+
+        self.assertIn("media: none", results[0]["reason"])
+
     def test_batches_forward_the_skip_set_and_the_reason(self):
         attempted = []
         reported = []
