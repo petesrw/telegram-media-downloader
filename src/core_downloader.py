@@ -827,7 +827,9 @@ async def download_single_file(client, channel, message, folder_name, progress_c
             file_path = None
 
             # 🚀 Strategy 0: High-Speed FastTelethon Parallel Chunk Downloader for files > 1MB
-            if file_size and file_size > 1024 * 1024 and expected_filepath:
+            message_gone = False
+            reference_refreshed = False
+            while file_size and file_size > 1024 * 1024 and expected_filepath:
                 try:
                     target_obj = getattr(message, 'media', None) or getattr(message, 'document', None) or getattr(message, 'video', None) or message
                     if target_obj:
@@ -848,6 +850,28 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                 except Exception as fast_err:
                     if isinstance(fast_err, ConnectionError) and client:
                         await reconnect_client(client)
+                    if client and channel and _is_file_reference_error(fast_err):
+                        # Telethon's fallback would re-fetch too, but crashes with
+                        # "'NoneType' object has no attribute 'media'" when the
+                        # message is gone; check first and hand it a fresh message.
+                        refreshed, gone_reason = await _refetch_message(client, channel, message)
+                        if gone_reason:
+                            fail(message.id, gone_reason)
+                            message_gone = True
+                            break
+                        if refreshed is not None:
+                            message = refreshed
+                            if not reference_refreshed:
+                                # Messages are fetched when the task starts, so files
+                                # reached hours later all expire at chunk 0. A fresh
+                                # reference works with the parallel engine again.
+                                reference_refreshed = True
+                                log_event(
+                                    "INFO",
+                                    f"message {message.id}: file reference refreshed; "
+                                    f"retrying the parallel download",
+                                )
+                                continue
                     if _has_saved_chunks(expected_filepath, file_size):
                         # Telethon's fallback restarts from byte 0 straight into the
                         # final file, discarding the chunks in .part. Let the retry
@@ -858,21 +882,14 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                             f"saved progress; retrying it instead of the single-stream fallback",
                         )
                         raise
-                    if client and channel and _is_file_reference_error(fast_err):
-                        # Telethon's fallback would re-fetch too, but crashes with
-                        # "'NoneType' object has no attribute 'media'" when the
-                        # message is gone; check first and hand it a fresh message.
-                        refreshed, gone_reason = await _refetch_message(client, channel, message)
-                        if gone_reason:
-                            fail(message.id, gone_reason)
-                            break
-                        if refreshed is not None:
-                            message = refreshed
                     log_event(
                         "WARNING",
                         f"message {message.id}: parallel engine failed, using Telethon "
                         f"fallback - {describe_download_error(fast_err)} ({fast_err})",
                     )
+                break
+            if message_gone:
+                break
 
             if not file_path:
                 try:

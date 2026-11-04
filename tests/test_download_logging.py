@@ -686,6 +686,71 @@ class TestParallelFailureKeepsPartialDownload(unittest.TestCase):
             loop.close()
         return fast_calls, fallback_calls, results
 
+    def _download_with_expiring_reference(self, expiries):
+        # The task fetched its messages hours ago, so a file that only now
+        # reaches the front of the queue starts with an expired reference.
+        from telethon.errors import FileReferenceExpiredError
+
+        fast_calls = []
+        fallback_calls = []
+
+        async def expiring_fast_download(**kwargs):
+            fast_calls.append(kwargs["location"])
+            if len(fast_calls) <= expiries:
+                raise FileReferenceExpiredError(request=None)
+            with open(kwargs["target_path"], "wb") as f:
+                f.write(b"x")
+            return True
+
+        cd.fast_download_file = expiring_fast_download
+
+        class Message(MockMessage):
+            async def download_media(self, file=None, progress_callback=None):
+                fallback_calls.append(file)
+                return None
+
+        stale = Message(7, size=self.SIZE)
+        stale.media = "stale-media"
+        fresh = Message(7, size=self.SIZE)
+        fresh.media = "fresh-media"
+
+        class Client:
+            async def get_messages(self, channel, ids=None):
+                return fresh
+
+        results = []
+
+        def complete_cb(msg_id, paused=False, filepath=None, error=False, reason=None):
+            results.append({"error": error, "filepath": filepath})
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cd.download_single_file(
+                client=Client(),
+                channel=object(),
+                message=stale,
+                folder_name=self.temp_dir,
+                complete_cb=complete_cb,
+            ))
+        finally:
+            loop.close()
+        return fast_calls, fallback_calls, results
+
+    def test_expired_reference_is_refreshed_and_retried_in_parallel(self):
+        # The single-stream fallback is several times slower and cannot resume
+        fast_calls, fallback_calls, results = self._download_with_expiring_reference(expiries=1)
+
+        self.assertEqual(fast_calls, ["stale-media", "fresh-media"])
+        self.assertEqual(fallback_calls, [])
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["error"])
+
+    def test_reference_that_expires_again_still_falls_back(self):
+        fast_calls, fallback_calls, results = self._download_with_expiring_reference(expiries=99)
+
+        self.assertEqual(fast_calls[:2], ["stale-media", "fresh-media"])
+        self.assertTrue(fallback_calls, "a second expiry must not loop forever")
+
     def test_timeout_with_saved_chunks_retries_the_parallel_engine(self):
         fast_calls, fallback_calls, results = self._download(saved_chunks={0, 1, 2})
 
