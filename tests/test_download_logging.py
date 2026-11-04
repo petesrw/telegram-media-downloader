@@ -913,6 +913,47 @@ class TestDeletedOnTelegramLabel(unittest.TestCase):
         self.assertEqual(card.lbl_status_text.text(), f"{al.DELETED_ON_TELEGRAM}: 1")
         self.assertEqual(card.lbl_status_text.property("state"), "deleted")
 
+    def test_remove_failed_button_is_hidden_until_a_file_fails(self):
+        card = self._card()
+
+        self.assertTrue(card.btn_remove_failed.isHidden())
+
+    def test_remove_failed_button_asks_to_drop_failed_and_deleted_files(self):
+        card = self._card()
+        card.mark_file_failed(1, "Network timeout - Telegram did not answer in time")
+        card.mark_file_failed(2, self._deleted_reason())
+        # A large queue only shows its first rows; hidden ones count too
+        card.mark_file_failed(500, "Download produced no file")
+        requested = []
+        card.removeFailedRequested.connect(lambda task_id, ids: requested.append((task_id, ids)))
+
+        self.assertFalse(card.btn_remove_failed.isHidden())
+        self.assertIn("3", card.btn_remove_failed.text())
+        card.btn_remove_failed.click()
+
+        self.assertEqual(requested, [("t1", [1, 2, 500])])
+
+    def test_removing_files_updates_the_failed_count(self):
+        card = self._card()
+        card.mark_file_failed(1, "Network timeout - Telegram did not answer in time")
+        card.mark_file_failed(2, "Network timeout - Telegram did not answer in time")
+
+        card.remove_file(1)
+        self.assertEqual(card.failed_count, 1)
+        self.assertIn("1", card.btn_remove_failed.text())
+
+        card.remove_file(2)
+        self.assertEqual(card.failed_count, 0)
+        self.assertTrue(card.btn_remove_failed.isHidden())
+
+    def test_a_failed_file_that_later_completes_is_not_removed(self):
+        card = self._card()
+        card.mark_file_failed(1, "Network timeout - Telegram did not answer in time")
+
+        card.mark_file_completed(1)
+
+        self.assertTrue(card.btn_remove_failed.isHidden())
+
     def test_real_failures_keep_the_failed_badge(self):
         card = self._card()
         card.mark_file_failed(1, "Network timeout - Telegram did not answer in time")

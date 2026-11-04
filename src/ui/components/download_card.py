@@ -44,6 +44,15 @@ class DownloadCard(QWidget):
     moveDownRequested = Signal(str)
     reselectRequested = Signal(str)
     removeFileRequested = Signal(str, int)  # task_id, msg_id
+    removeFailedRequested = Signal(str, list)  # task_id, msg_ids
+
+    @property
+    def failed_count(self):
+        return len(self.failed_ids)
+
+    @property
+    def deleted_count(self):
+        return len(self.deleted_ids)
 
     # ──────────────────────────────────────────────────────────────────────────
     # UI
@@ -129,8 +138,10 @@ class DownloadCard(QWidget):
         self.lbl_reason.setVisible(False)
         rc.addWidget(self.lbl_reason)
 
-        self.failed_count = 0
-        self.deleted_count = 0
+        # Sets, not counters: a file may fail more than once, and the
+        # bulk remove has to know which files these are
+        self.failed_ids = set()
+        self.deleted_ids = set()
 
         # row 4 – action buttons
         ar = QHBoxLayout()
@@ -151,6 +162,16 @@ class DownloadCard(QWidget):
         self.btn_trash = QPushButton("🗑 Remove")
         self.btn_trash.setObjectName("CardButton")
 
+        self.btn_remove_failed = QPushButton()
+        self.btn_remove_failed.setObjectName("CardButton")
+        self.btn_remove_failed.setToolTip("Drop every failed or deleted file from this task")
+        self.btn_remove_failed.clicked.connect(
+            lambda checked=False: self.removeFailedRequested.emit(
+                self.task_id, sorted(self.failed_ids | self.deleted_ids)
+            )
+        )
+        self.btn_remove_failed.setVisible(False)
+
         self.btn_reselect = QPushButton("🔄 Re-select")
         self.btn_reselect.setObjectName("CardButton")
         self.btn_reselect.setToolTip("Add or remove files for this specific task")
@@ -161,6 +182,7 @@ class DownloadCard(QWidget):
         ar.addWidget(self.btn_verify)
         ar.addWidget(self.btn_reselect)
         ar.addWidget(self.btn_trash)
+        ar.addWidget(self.btn_remove_failed)
         ar.addStretch()
 
         self.btn_up = QPushButton("⬆")
@@ -364,7 +386,8 @@ class DownloadCard(QWidget):
         if is_deleted_on_telegram(reason):
             self.mark_file_deleted(msg_id, reason)
             return
-        self.failed_count += 1
+        self.failed_ids.add(msg_id)
+        self._refresh_remove_failed()
         self._show_reason(f"❌ File {msg_id} failed: {reason}", "#EF4444")
         self._refresh_status_badge("failed", f"Failed: {self.failed_count}")
         row = self.file_rows.get(msg_id)
@@ -373,7 +396,9 @@ class DownloadCard(QWidget):
 
     def mark_file_deleted(self, msg_id, reason):
         """Label a file Telegram no longer has; a retry cannot bring it back."""
-        self.deleted_count += 1
+        self.failed_ids.discard(msg_id)
+        self.deleted_ids.add(msg_id)
+        self._refresh_remove_failed()
         self._show_reason(f"🗑️ File {msg_id}: {reason}", "#9CA3AF")
         if self.failed_count == 0:
             # Real failures need attention more, so they keep the badge
@@ -395,6 +420,11 @@ class DownloadCard(QWidget):
         if row:
             row.set_stalled(reason)
 
+    def _refresh_remove_failed(self):
+        count = len(self.failed_ids | self.deleted_ids)
+        self.btn_remove_failed.setText(f"🧹 Remove failed ({count})")
+        self.btn_remove_failed.setVisible(count > 0)
+
     def clear_reason(self):
         self._show_reason("", "")
 
@@ -407,8 +437,9 @@ class DownloadCard(QWidget):
 
         self.files_metadata = [m for m in self.files_metadata if m.get("id") != msg_id]
         self.lbl_reason.setVisible(False)
-        self.failed_count = 0
-        self.deleted_count = 0
+        self.failed_ids.discard(msg_id)
+        self.deleted_ids.discard(msg_id)
+        self._refresh_remove_failed()
 
         # A removed item is no longer pending work
         self.total_items = max(0, self.total_items - 1)
@@ -450,6 +481,9 @@ class DownloadCard(QWidget):
             self.file_rows[msg_id].set_progress(current_bytes, total_bytes)
 
     def mark_file_completed(self, msg_id):
+        self.failed_ids.discard(msg_id)
+        self.deleted_ids.discard(msg_id)
+        self._refresh_remove_failed()
         if msg_id in self.file_rows:
             self.file_rows[msg_id].set_completed()
 

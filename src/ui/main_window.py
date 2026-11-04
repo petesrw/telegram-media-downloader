@@ -868,6 +868,7 @@ class MainWindow(QMainWindow):
         card.moveUpRequested.connect(self.move_task_up)
         card.moveDownRequested.connect(self.move_task_down)
         card.removeFileRequested.connect(self.remove_file_from_task)
+        card.removeFailedRequested.connect(self.remove_failed_files)
 
     def move_card(self, card, direction):
         """direction: -1 (up), 1 (down)"""
@@ -956,7 +957,26 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.Yes:
             return
+        self._drop_file_from_task(task_id, msg_id)
 
+    def remove_failed_files(self, task_id, msg_ids):
+        """Drop every failed or deleted file of a task after one confirmation."""
+        if not msg_ids:
+            return
+        reply = QMessageBox.question(
+            self, "Remove Failed Files",
+            f"Remove {len(msg_ids)} failed or deleted file(s) from this task?\n\n"
+            "Their partial data is deleted and they will not be downloaded again, "
+            "so the rest of the queue can finish.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        for msg_id in msg_ids:
+            self._drop_file_from_task(task_id, msg_id)
+        log_event("INFO", f"[{task_id}] removed {len(msg_ids)} failed file(s) from the queue")
+
+    def _drop_file_from_task(self, task_id, msg_id):
         card = self.card_widgets.get(task_id)
         folder = card.folder_name if card else None
         filename = None
