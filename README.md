@@ -161,6 +161,10 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.6
+- 🎬 **No More Empty Or Cut-Off Videos**: Telethon's single-stream fallback creates the final file before any data arrives. When the download then failed, a 0-byte or partial file stayed under the real name, and players such as VLC could not open it. The fallback now downloads to `<name>.dl`, and the file is renamed into place only once its size matches what Telegram reports. A short download is retried and then reported as "Download incomplete - received X of Y bytes", never as completed.
+- 🛡️ **Verify Checks Every File**: **Verify** only checked the first 100 files shown on the card. It now checks every file in the task, queues cut-off or deleted files for download again, and leaves files that are not downloaded yet alone.
+
 ### v2.9.5
 - 🔐 **Fast Decryption (cryptg) Is Bundled Again**: The exe was built without `cryptg`, so Telethon decrypted every downloaded byte in pure Python. Each 512 KB chunk took ~950 ms of CPU, which capped downloads at ~500 KB/s. It also held Python's GIL so long that the window showed "Not Responding", most visibly on the Files tab. With cryptg the same chunk takes ~1 ms. The app now logs a warning at startup if cryptg is ever missing again.
 

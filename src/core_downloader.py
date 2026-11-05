@@ -35,6 +35,38 @@ DEFAULT_STALL_WARN_SECONDS = 45
 DEFAULT_STALL_ABORT_SECONDS = 180
 STALL_POLL_SECONDS = 5.0
 
+# The single-stream fallback writes here; only a complete file is renamed into
+# place, so a failed or cut-off download never sits under the real name.
+INCOMPLETE_SUFFIX = ".dl"
+
+
+class IncompleteDownloadError(Exception):
+    """Telegram stopped sending data before the whole file arrived."""
+
+
+def _discard(path):
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError as e:
+            log_event("WARNING", f"could not remove incomplete file {os.path.basename(path)}: {e}")
+
+
+def _accept_download(file_path, expected_filepath, incomplete_path, file_size):
+    """Return the final path of a finished download, or raise when it is short."""
+    got = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    if file_size and got < file_size:
+        if file_path == incomplete_path:
+            _discard(incomplete_path)
+        raise IncompleteDownloadError(
+            f"Download incomplete - received {got} of {file_size} bytes"
+        )
+    if incomplete_path and file_path == incomplete_path:
+        os.replace(incomplete_path, expected_filepath)
+        return expected_filepath
+    return file_path
+
+
 def crypto_backend_warning():
     """Return a warning when Telethon must decrypt downloads in pure Python.
 
@@ -572,7 +604,10 @@ async def download_single_file(client, channel, message, folder_name, progress_c
         return
 
     max_retries = 3
+    incomplete_path = None
     for attempt in range(max_retries):
+        _discard(incomplete_path)
+        incomplete_path = None
         last_activity[0] = time.time()
         stall_phase[0] = "waiting for the first response from Telegram"
         stall_warned[0] = False
@@ -847,7 +882,11 @@ async def download_single_file(client, channel, message, folder_name, progress_c
 
 
             dir_path = os.path.join(folder_name, "")
-            target_path = expected_filepath if file_name else dir_path
+            if file_name:
+                incomplete_path = expected_filepath + INCOMPLETE_SUFFIX
+                target_path = incomplete_path
+            else:
+                target_path = dir_path
             
             file_path = None
 
@@ -924,6 +963,7 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                         progress_callback=internal_progress,
                     )
                 except PauseRequested:
+                    _discard(incomplete_path)  # single-stream cannot resume
                     if complete_cb: complete_cb(message.id, paused=True, filepath=None)
                     return
                 except AttributeError as attr_err:
@@ -968,6 +1008,7 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                                         progress_callback=internal_progress,
                                     )
                                 except PauseRequested:
+                                    _discard(incomplete_path)  # single-stream cannot resume
                                     if complete_cb: complete_cb(message.id, paused=True, filepath=None)
                                     return
                                 except Exception as e3:
@@ -981,12 +1022,16 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                         raise attr_err
 
             if not file_path:
+                _discard(incomplete_path)
                 fail(
                     message.id,
                     "Download produced no file - Telegram returned no data and the "
                     f"single-stream fallback failed ({_describe_media(message)})",
                 )
                 break
+
+            file_path = _accept_download(file_path, expected_filepath, incomplete_path, file_size)
+            incomplete_path = None
 
             if complete_cb:
                 complete_cb(message.id, filepath=file_path)
@@ -1024,6 +1069,8 @@ async def download_single_file(client, channel, message, folder_name, progress_c
             break
 
         except asyncio.CancelledError:
+            _discard(incomplete_path)
+            incomplete_path = None
             if abort_reason[0]:
                 # The stall watchdog cancelled us: this is a failure with a reason,
                 # not a user pause, so report it as such.
@@ -1045,6 +1092,8 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                 fail(message.id, f"Failed after {max_retries} attempts - {CONNECTION_DROPPED}")
             break
         except Exception as e:
+            _discard(incomplete_path)
+            incomplete_path = None
             reason = describe_download_error(e)
             from telethon.errors import FloodWaitError
             if isinstance(e, FloodWaitError):

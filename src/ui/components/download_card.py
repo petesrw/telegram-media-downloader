@@ -493,6 +493,10 @@ class DownloadCard(QWidget):
         self.failed_ids.discard(msg_id)
         self.deleted_ids.discard(msg_id)
         self._refresh_remove_failed()
+        for meta in self.files_metadata:
+            if meta.get("id") == msg_id:
+                meta["completed"] = True  # Verify relies on it
+                break
         if msg_id in self.file_rows:
             self.file_rows[msg_id].set_completed()
 
@@ -549,11 +553,14 @@ class DownloadCard(QWidget):
         missing = 0
         valid = 0
         
-        for msg_id, row in self.file_rows.items():
-            meta = next((m for m in self.files_metadata if m["id"] == msg_id), None)
-            if not meta:
+        # Every file of the task: the card only draws rows for the first 100
+        for meta in self.files_metadata:
+            if meta.get("removed"):
                 continue
-            
+            msg_id = meta["id"]
+            row = self.file_rows.get(msg_id)
+            expected_size = meta.get("size") or 0
+
             fpath = os.path.join(self.folder_name, meta["name"])
             if not os.path.exists(fpath):
                 db_filename = get_media_downloaded_path(c_id, msg_id)
@@ -562,35 +569,42 @@ class DownloadCard(QWidget):
                     if os.path.exists(candidate):
                         fpath = candidate
 
-            if not os.path.exists(fpath):
-                missing += 1
-                row.icon.setText("❓")
-                row.bar.setProperty("state", "idle")
+            on_disk = os.path.exists(fpath)
+            actual_size = os.path.getsize(fpath) if on_disk else 0
+            intact = on_disk and actual_size > 0 and (
+                expected_size <= 0 or actual_size == expected_size
+            )
+
+            if intact:
+                valid += 1
+                meta["completed"] = True
+                state, icon = "completed", "✅"
+                try:
+                    mark_media_completed(c_id, msg_id)
+                except Exception:
+                    pass
+            elif not meta.get("completed"):
+                # Not downloaded yet (a leftover empty file included): still pending
+                continue
+            else:
+                if on_disk:
+                    corrupt += 1
+                    state, icon = "paused", "⚠️"
+                else:
+                    missing += 1
+                    state, icon = "idle", "❓"
+                meta["completed"] = False
                 try:
                     unmark_media_completed(c_id, msg_id)
                 except Exception:
                     pass
-            else:
-                actual_size = os.path.getsize(fpath)
-                if meta["size"] > 0 and actual_size != meta["size"]:
-                    corrupt += 1
-                    row.icon.setText("⚠️")
-                    row.bar.setProperty("state", "paused")
-                    try:
-                        unmark_media_completed(c_id, msg_id)
-                    except Exception:
-                        pass
-                else:
-                    valid += 1
-                    row.icon.setText("✅")
-                    row.bar.setProperty("state", "completed")
-                    try:
-                        mark_media_completed(c_id, msg_id)
-                    except Exception:
-                        pass
-            row.bar.style().unpolish(row.bar)
-            row.bar.style().polish(row.bar)
-            
+
+            if row is not None:
+                row.icon.setText(icon)
+                row.bar.setProperty("state", state)
+                row.bar.style().unpolish(row.bar)
+                row.bar.style().polish(row.bar)
+
         self.completed = valid
         self.batch_progress_bar.setValue(valid)
         self.lbl_status.setText(f"Downloaded {valid} out of {self.total_items} items")

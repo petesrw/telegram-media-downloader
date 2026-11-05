@@ -721,7 +721,7 @@ class TestParallelFailureKeepsPartialDownload(unittest.TestCase):
             if len(fast_calls) <= expiries:
                 raise FileReferenceExpiredError(request=None)
             with open(kwargs["target_path"], "wb") as f:
-                f.write(b"x")
+                f.truncate(kwargs["file_size"])  # a complete file, as the engine produces
             return True
 
         cd.fast_download_file = expiring_fast_download
