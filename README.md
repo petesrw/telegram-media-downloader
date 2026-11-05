@@ -161,6 +161,9 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.7
+- 🔔 **Subscribe To A Channel**: Enter a channel on Home and press **Subscribe**, then pick a media type. The app checks the channel every 5 minutes, and once at startup, and downloads posts published after you subscribed as an ordinary task in the Queue. The **Subscriptions** section in the Queue tab shows each channel and the result of its last check, and has **Check Now** and **Unsubscribe** buttons. A subscription never replaces a whole-category download of the same channel. New posts wait until that download finishes, and none are skipped. The interval is `subscription_interval_minutes` in `config.json`.
+
 ### v2.9.6
 - 🎬 **No More Empty Or Cut-Off Videos**: Telethon's single-stream fallback creates the final file before any data arrives. When the download then failed, a 0-byte or partial file stayed under the real name, and players such as VLC could not open it. The fallback now downloads to `<name>.dl`, and the file is renamed into place only once its size matches what Telegram reports. A short download is retried and then reported as "Download incomplete - received X of Y bytes", never as completed.
 - 🛡️ **Verify Checks Every File**: **Verify** only checked the first 100 files shown on the card. It now checks every file in the task, queues cut-off or deleted files for download again, and leaves files that are not downloaded yet alone.

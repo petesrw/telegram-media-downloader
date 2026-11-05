@@ -76,10 +76,55 @@ class CompletedDownloadRow(QFrame):
             if self.parent_view.history_layout.count() <= 1:
                 self.parent_view.empty_lbl.show()
 
+class SubscriptionRow(QFrame):
+    """One watched channel: what it watches, the last check, and Unsubscribe."""
+
+    def __init__(self, sub, parent_view):
+        super().__init__()
+        from subscriptions import MEDIA_LABELS
+
+        self.sub_id = sub["sub_id"]
+        self.setObjectName("WhiteCard")
+        self.setProperty("compact", True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 16, 10)
+
+        text_col = QVBoxLayout()
+        category = MEDIA_LABELS.get(sub.get("media_id"), str(sub.get("media_id")))
+        self.lbl_title = QLabel(f"🔔 {sub.get('title') or sub.get('channel_input')} · {category}")
+        self.lbl_title.setObjectName("CardTitle")
+
+        if sub.get("last_checked"):
+            status = f"Last check {sub['last_checked']}: {sub.get('last_result') or ''}"
+        else:
+            status = "Not checked yet - new posts download on the next check"
+        self.lbl_status = QLabel(status)
+        self.lbl_status.setObjectName("MutedText")
+        self.lbl_status.setStyleSheet("font-size: 11px;")
+        self.lbl_status.setWordWrap(True)
+        text_col.addWidget(self.lbl_title)
+        text_col.addWidget(self.lbl_status)
+
+        self.btn_unsubscribe = QPushButton("🔕 Unsubscribe")
+        self.btn_unsubscribe.setObjectName("SecondaryButton")
+        self.btn_unsubscribe.setCursor(Qt.PointingHandCursor)
+        self.btn_unsubscribe.clicked.connect(
+            lambda: parent_view.unsubscribeRequested.emit(self.sub_id)
+        )
+
+        layout.addLayout(text_col, stretch=1)
+        layout.addWidget(self.btn_unsubscribe)
+
+
 class DownloadsView(QWidget):
     reFetchRequested = Signal(str)
+    unsubscribeRequested = Signal(str)  # sub_id
+    checkSubscriptionsRequested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.subscription_rows = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -129,7 +174,29 @@ class DownloadsView(QWidget):
         self.active_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.addWidget(self.active_container)
 
-        # 2. Completed Downloads Section
+        # 2. Subscriptions (channels watched for new posts); hidden when empty
+        self.subscriptions_container = QWidget()
+        subs_outer = QVBoxLayout(self.subscriptions_container)
+        subs_outer.setContentsMargins(0, 0, 0, 0)
+        subs_outer.setSpacing(8)
+        subs_header = QHBoxLayout()
+        self.lbl_subscriptions = QLabel("Subscriptions")
+        self.lbl_subscriptions.setObjectName("MainHeader")
+        self.btn_check_now = QPushButton("🔄 Check Now")
+        self.btn_check_now.setObjectName("SecondaryButton")
+        self.btn_check_now.setCursor(Qt.PointingHandCursor)
+        self.btn_check_now.clicked.connect(self.checkSubscriptionsRequested.emit)
+        subs_header.addWidget(self.lbl_subscriptions)
+        subs_header.addStretch()
+        subs_header.addWidget(self.btn_check_now)
+        subs_outer.addLayout(subs_header)
+        self.subscriptions_layout = QVBoxLayout()
+        self.subscriptions_layout.setSpacing(8)
+        subs_outer.addLayout(self.subscriptions_layout)
+        self.subscriptions_container.hide()
+        self.content_layout.addWidget(self.subscriptions_container)
+
+        # 3. Completed Downloads Section
         completed_header_row = QHBoxLayout()
         self.lbl_completed = QLabel("Completed")
         self.lbl_completed.setObjectName("MainHeader")
@@ -169,6 +236,19 @@ class DownloadsView(QWidget):
         else:
             self.btn_pause_all.hide()
             self.btn_resume_all.hide()
+
+    def set_subscriptions(self, subscriptions):
+        """Show the watched channels; the section hides when there are none."""
+        for row in self.subscription_rows.values():
+            self.subscriptions_layout.removeWidget(row)
+            row.setParent(None)
+            row.deleteLater()
+        self.subscription_rows = {}
+        for sub in subscriptions:
+            row = SubscriptionRow(sub, self)
+            self.subscriptions_layout.addWidget(row)
+            self.subscription_rows[sub["sub_id"]] = row
+        self.subscriptions_container.setVisible(bool(subscriptions))
 
     def add_completed_item(self, title, folder_name, task_id=None):
         self.empty_lbl.hide()

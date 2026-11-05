@@ -313,6 +313,13 @@ class MainWindow(QMainWindow):
         self.page_queue.btn_pause_all.clicked.connect(self.pause_all_downloads)
         self.page_queue.btn_resume_all.clicked.connect(self.resume_all_downloads)
         self.page_queue.reFetchRequested.connect(self.re_fetch_from_history)
+        self.page_queue.unsubscribeRequested.connect(self.unsubscribe)
+        self.page_queue.checkSubscriptionsRequested.connect(self.worker.check_subscriptions)
+        self.refresh_subscriptions()
+
+        # Subscribe mode: check watched channels on a timer (started after login)
+        self.subscription_timer = QTimer(self)
+        self.subscription_timer.timeout.connect(self.worker.check_subscriptions)
         
         content_layout.addWidget(self.stacked_widget)
 
@@ -370,8 +377,15 @@ class MainWindow(QMainWindow):
         self.btn_fetch.setMinimumHeight(44)
         self.btn_fetch.clicked.connect(self.on_fetch_clicked)
         
+        self.btn_subscribe = QPushButton("🔔 Subscribe")
+        self.btn_subscribe.setObjectName("SecondaryButton")
+        self.btn_subscribe.setMinimumHeight(44)
+        self.btn_subscribe.setToolTip("Watch this channel and download its new posts automatically")
+        self.btn_subscribe.clicked.connect(self.on_subscribe_clicked)
+
         search_input_layout.addWidget(self.input_channel, stretch=1)
         search_input_layout.addWidget(self.btn_fetch)
+        search_input_layout.addWidget(self.btn_subscribe)
         
         lbl_hint = QLabel("Tip: enter @username, https://t.me/username, numeric channel ID, or channelID_topicID")
         lbl_hint.setObjectName("MutedText")
@@ -471,6 +485,9 @@ class MainWindow(QMainWindow):
         self.worker.signals.file_stalled.connect(self.on_file_stalled)
         self.worker.signals.download_completed.connect(self.on_download_completed)
         self.worker.signals.error_occurred.connect(self.on_fetch_error)
+        self.worker.signals.subscription_added.connect(self.on_subscription_added)
+        self.worker.signals.subscription_failed.connect(self.on_subscription_failed)
+        self.worker.signals.subscriptions_changed.connect(self.refresh_subscriptions)
 
         # LogsView subscribes itself to LogBus; connecting here too doubled every line
 
@@ -527,6 +544,7 @@ class MainWindow(QMainWindow):
             self._is_authenticating = False
             auth_dialogs.show_auth_success(self)
         self.load_active_tasks_from_worker()
+        self.start_subscription_checks()
         
     def load_active_tasks_from_worker(self):
         print("DEBUG: load_active_tasks_from_worker started")
@@ -640,6 +658,83 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
         
+    # ---------------------------------------------------------
+    # Subscribe mode
+    # ---------------------------------------------------------
+    def start_subscription_checks(self):
+        """Check now (after tasks resumed), then every N minutes."""
+        from ui.views.settings_view import load_config
+        try:
+            minutes = max(1, int(load_config().get("subscription_interval_minutes", 5)))
+        except (TypeError, ValueError):
+            minutes = 5
+        self.subscription_timer.start(minutes * 60 * 1000)
+        QTimer.singleShot(10_000, self.worker.check_subscriptions)
+
+    def refresh_subscriptions(self):
+        from database import list_subscriptions
+        try:
+            self.page_queue.set_subscriptions(list_subscriptions())
+        except Exception as e:
+            log_event("WARNING", f"could not load subscriptions: {e}")
+
+    def on_subscribe_clicked(self):
+        from PySide6.QtWidgets import QInputDialog
+        from subscriptions import MEDIA_LABELS
+        from ui.views.settings_view import load_config
+
+        channel = self.input_channel.text().strip()
+        if not channel:
+            QMessageBox.information(
+                self, "Subscribe",
+                "Enter a channel (username, link or ID) first, then press Subscribe.",
+            )
+            return
+        labels = [MEDIA_LABELS[k] for k in (6, 2, 1, 3, 4, 5)]
+        choice, ok = QInputDialog.getItem(
+            self, "Subscribe",
+            f"Download new posts of '{channel}' automatically.\n\n"
+            "Only posts published from now on are downloaded.\nWhich media?",
+            labels, 0, False,
+        )
+        if not ok:
+            return
+        media_id = next(k for k, v in MEDIA_LABELS.items() if v == choice)
+        self.btn_subscribe.setEnabled(False)
+        self.btn_subscribe.setText("⏳ Subscribing...")
+        self.worker.subscribe(channel, media_id, load_config().get("download_path", "downloads"))
+
+    def _reset_subscribe_button(self):
+        self.btn_subscribe.setEnabled(True)
+        self.btn_subscribe.setText("🔔 Subscribe")
+
+    def on_subscription_added(self, description):
+        self._reset_subscribe_button()
+        self.input_channel.clear()
+        QMessageBox.information(
+            self, "Subscribed",
+            f"Subscribed to {description}.\n\nNew posts are checked every few minutes "
+            "and appear in the Queue tab.",
+        )
+
+    def on_subscription_failed(self, reason):
+        self._reset_subscribe_button()
+        QMessageBox.warning(self, "Subscribe Failed", f"Could not subscribe:\n{reason}")
+
+    def unsubscribe(self, sub_id):
+        from database import remove_subscription
+        reply = QMessageBox.question(
+            self, "Unsubscribe",
+            "Stop watching this channel for new posts?\n\n"
+            "Files already downloaded and downloads in progress are kept.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        remove_subscription(sub_id)
+        log_event("INFO", f"unsubscribed {sub_id}")
+        self.refresh_subscriptions()
+
     def on_fetch_clicked(self):
         channel = self.input_channel.text().strip()
         if not channel: return

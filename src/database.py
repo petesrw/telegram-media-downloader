@@ -62,6 +62,20 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # 3. Subscriptions: channels watched for new posts (Subscribe mode)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        sub_id TEXT PRIMARY KEY,  -- '<channel key>[_<topic>]_<media id>'
+        channel_input TEXT,       -- resolved channel ID, plus '_<topic>' if any
+        media_id INTEGER,
+        title TEXT,
+        download_path TEXT,
+        last_msg_id INTEGER DEFAULT 0,  -- newest post already handled
+        last_checked TEXT,
+        last_result TEXT
+    )
+    """)
+
     # Migration: why each file failed, so the card can list them after a restart
     try:
         cursor.execute("ALTER TABLE tasks ADD COLUMN failed_ids TEXT")
@@ -337,6 +351,58 @@ def load_task_failures(task_id_or_chan):
         failures.update(_parse_failures(row["failed_ids"]))
     conn.close()
     return failures
+
+# --- SUBSCRIPTIONS ---
+
+def subscription_id(channel_input, media_id):
+    """Stable key for one channel (and topic) plus media category."""
+    raw = str(channel_input).strip()
+    chan, _, topic = raw.rpartition("_")
+    if chan and topic.isdigit():
+        return f"{normalize_channel_key(chan)}_{topic}_{int(media_id)}"
+    return f"{normalize_channel_key(raw)}_{int(media_id)}"
+
+def save_subscription(sub):
+    """Create or update a subscription; returns its sub_id."""
+    sub_id = subscription_id(sub["channel_input"], sub["media_id"])
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+    INSERT INTO subscriptions (sub_id, channel_input, media_id, title, download_path, last_msg_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(sub_id) DO UPDATE SET
+        channel_input=excluded.channel_input,
+        title=excluded.title,
+        download_path=excluded.download_path,
+        last_msg_id=excluded.last_msg_id
+    """, (
+        sub_id, str(sub["channel_input"]), int(sub["media_id"]), sub.get("title"),
+        sub.get("download_path"), int(sub.get("last_msg_id") or 0),
+    ))
+    conn.commit()
+    conn.close()
+    return sub_id
+
+def list_subscriptions():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute("SELECT * FROM subscriptions ORDER BY title, sub_id")]
+    conn.close()
+    return rows
+
+def update_subscription_check(sub_id, last_msg_id, last_checked, last_result):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE subscriptions SET last_msg_id=?, last_checked=?, last_result=? WHERE sub_id=?",
+        (int(last_msg_id or 0), last_checked, last_result, sub_id),
+    )
+    conn.commit()
+    conn.close()
+
+def remove_subscription(sub_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM subscriptions WHERE sub_id=?", (sub_id,))
+    conn.commit()
+    conn.close()
 
 def load_task_skipped_ids(task_id_or_chan):
     """Return the set of message IDs the user removed from a task."""

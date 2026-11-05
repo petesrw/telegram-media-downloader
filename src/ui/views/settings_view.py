@@ -27,6 +27,7 @@ def load_config():
         "stall_warn_seconds": 45,   # report "no progress" after this many seconds
         "stall_abort_seconds": 180, # cancel a stalled attempt so it frees its slot
         "log_to_file": True,        # write downloader.log next to config.json
+        "subscription_interval_minutes": 5,  # how often subscribed channels are checked
         "dark_mode": None,  # None = follow Windows system setting
         "proxy": {
             "enabled": False,

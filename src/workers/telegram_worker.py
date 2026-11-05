@@ -39,6 +39,11 @@ class WorkerSignals(QObject):
     download_completed = Signal(str, str) # task_id, folder_name
     error_occurred = Signal(str, str) # task_id, error_msg
 
+    # Subscribe mode
+    subscription_added = Signal(str)    # title / description
+    subscription_failed = Signal(str)   # reason
+    subscriptions_changed = Signal()
+
 
 class TelegramWorker(QThread):
     def __init__(self, session_name, api_id, api_hash, parent=None):
@@ -53,6 +58,7 @@ class TelegramWorker(QThread):
         self.running_tasks = {} # task_id -> future or task
         # task_id -> set of message IDs the user removed from that task
         self.skipped_files = {}
+        self._checking_subscriptions = False
 
     def _create_client(self):
         from ui.views.settings_view import get_telegram_proxy
@@ -210,6 +216,68 @@ class TelegramWorker(QThread):
     # -------------------------------------------------------------------------
     # DOWNLOADS
     # -------------------------------------------------------------------------
+    # --- Subscribe mode ---------------------------------------------------
+
+    def subscribe(self, channel_input, media_id, download_path):
+        """Called from Main UI: watch a channel for new posts of one category."""
+        asyncio.run_coroutine_threadsafe(
+            self._subscribe_coro(channel_input, media_id, download_path), self.loop
+        )
+
+    async def _subscribe_coro(self, channel_input, media_id, download_path):
+        from subscriptions import create_subscription, MEDIA_LABELS
+        try:
+            sub = await create_subscription(self.client, channel_input, media_id, download_path)
+        except Exception as e:
+            log_event("WARNING", f"could not subscribe to {channel_input}: {e}")
+            self.signals.subscription_failed.emit(f"{channel_input}: {e}")
+            return
+        self.signals.subscription_added.emit(
+            f"{sub['title']} ({MEDIA_LABELS.get(int(media_id), media_id)})"
+        )
+        self.signals.subscriptions_changed.emit()
+
+    def check_subscriptions(self):
+        """Called from Main UI (timer or Check Now): queue new posts of every subscription."""
+        if self.loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._check_subscriptions_coro(), self.loop)
+
+    async def _check_subscriptions_coro(self):
+        if self._checking_subscriptions:
+            return  # a check is still running; the next tick will catch up
+        self._checking_subscriptions = True
+        try:
+            from database import list_subscriptions
+            from subscriptions import check_subscription
+            from ui.views.settings_view import load_config
+
+            subs = list_subscriptions()
+            if not subs or self.client is None:
+                return
+            if not self.client.is_connected() or not await self.client.is_user_authorized():
+                return
+            cfg = load_config()
+
+            def start(channel_input, media_id, download_path, ids):
+                self.start_download(
+                    channel_input=channel_input,
+                    media_id=media_id,
+                    download_path=download_path or cfg.get("download_path", "downloads"),
+                    download_limit=cfg.get("download_limit", 5),
+                    max_speed_kb=cfg.get("max_speed_kb", 0),
+                    selected_message_ids=ids,
+                )
+
+            for sub in subs:
+                # Re-read tasks each time: an earlier subscription may have added one
+                await check_subscription(self.client, sub, load_active_tasks(), start)
+        except Exception as e:
+            log_event("WARNING", f"subscription check failed: {e}")
+        finally:
+            self._checking_subscriptions = False
+            self.signals.subscriptions_changed.emit()
+
     def fetch_media_list(self, channel_input, limit=None):
         """Called from Main UI to just fetch and group the messages for the modal."""
         asyncio.run_coroutine_threadsafe(self._fetch_media_list_coro(channel_input, limit), self.loop)
