@@ -42,7 +42,9 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.3
+- **Current Version**: 2.9.4
+- **Completed in v2.9.4**:
+  - [x] **Fast Files Tab**: Checkable items instead of per-row widgets, buttons only for visible rows, debounced search, single-pass Select All.
 - **Completed in v2.9.3**:
   - [x] **Saved Failures**: Failed files and their reasons are stored with the task, so the Remove failed button shows them after a restart.
   - [x] **No-Media Posts**: Messages without media fail immediately as "Deleted on Telegram" instead of "Download produced no file".

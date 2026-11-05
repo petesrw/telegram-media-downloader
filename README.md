@@ -161,6 +161,9 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.4
+- 🚀 **Files Tab No Longer Hangs**: Every row of the downloaded-files list had its own checkbox widget and button widgets, so a history of ~1,850 files took over a second to build on every visit and every search keystroke, and **Select All** froze the app for ~18 seconds. Rows are now plain table items, buttons are built only for the rows on screen, search waits for typing to pause, and Select All counts once. Opening the tab takes ~0.3s and Select All is instant.
+
 ### v2.9.3
 - 💾 **Failed Files Are Remembered After A Restart**: Failures used to live only on the open task card, so after reopening the app the **Remove failed (N)** button stayed hidden until each file failed again. Each failure and its reason are now saved with the task, and the card lists them as soon as it loads. A file that later downloads, or that you remove, is cleared from the list.
 - 🗑️ **Posts Without Media Are Labelled "Deleted on Telegram"**: A post whose media was removed failed with "Download produced no file (media: none)" after trying the slow fallback. It now fails at once with the grey "Deleted on Telegram" label, so it is clear that no retry can download it.

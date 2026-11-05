@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QMenu, QMessageBox, QApplication, QFrame, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtCore import Qt, Signal, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices, QIcon, QColor
 
 from database import (
@@ -66,6 +66,13 @@ class FileManagerView(QWidget):
         super().__init__(parent)
         self.all_items = []
         self.channel_summaries = []
+        # Rows of the current table: (item, fname, chan_name, fpath, on_disk)
+        self._rows = []
+        # Filtering thousands of rows per keystroke made typing lag
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self.apply_filter)
         self.setup_ui()
         self.refresh_list()
 
@@ -113,7 +120,7 @@ class FileManagerView(QWidget):
         # Search Bar
         self.input_search = QLineEdit()
         self.input_search.setPlaceholderText("🔍 Search by filename, ID, or channel...")
-        self.input_search.textChanged.connect(self.apply_filter)
+        self.input_search.textChanged.connect(self._search_timer.start)
         f_layout.addWidget(self.input_search, stretch=3)
 
         # Channel Selector Dropdown
@@ -172,6 +179,9 @@ class FileManagerView(QWidget):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.doubleClicked.connect(self.on_row_double_click)
+        self.table.itemChanged.connect(self._on_item_changed)
+        # Button widgets are only built for rows on screen (see _ensure_visible_actions)
+        self.table.verticalScrollBar().valueChanged.connect(self._ensure_visible_actions)
 
         main_layout.addWidget(self.table, stretch=1)
 
@@ -287,132 +297,171 @@ class FileManagerView(QWidget):
         self.lbl_stats.setText(f"{len(filtered)} items ({format_bytes(total_disk_size)} on disk)")
         self.render_table(filtered)
 
+    TYPE_ICONS = {
+        "photo": "🖼️", "image": "🖼️", "images": "🖼️",
+        "video": "🎬", "videos": "🎬",
+        "pdf": "📄", "pdfs": "📄", "document": "📄", "documents": "📄",
+        "zip": "📦", "zips": "📦",
+        "audio": "🎵", "music": "🎵", "voice": "🎙️"
+    }
+
     def render_table(self, filtered_items):
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(filtered_items))
+        """Fill the table with plain items; buttons come later, per visible row.
 
-        type_icons = {
-            "photo": "🖼️", "image": "🖼️", "images": "🖼️",
-            "video": "🎬", "videos": "🎬",
-            "pdf": "📄", "pdfs": "📄", "document": "📄", "documents": "📄",
-            "zip": "📦", "zips": "📦",
-            "audio": "🎵", "music": "🎵", "voice": "🎙️"
-        }
+        Building a checkbox widget and a button widget for each of thousands
+        of rows is what made the Files tab hang.
+        """
+        self._rows = list(filtered_items)
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(self._rows))
 
-        for row, (item, fname, chan_name, fpath, on_disk) in enumerate(filtered_items):
-            # 0. Checkbox
-            chk = QCheckBox()
-            chk.setProperty("row_item", item)
-            chk.stateChanged.connect(self.update_selected_count)
-            chk_widget = QWidget()
-            chk_layout = QHBoxLayout(chk_widget)
-            chk_layout.setContentsMargins(8, 0, 0, 0)
-            chk_layout.addWidget(chk)
-            chk_layout.setAlignment(Qt.AlignCenter)
-            self.table.setCellWidget(row, 0, chk_widget)
+            for row, (item, fname, chan_name, fpath, on_disk) in enumerate(self._rows):
+                # 0. Checkbox (a checkable item, not a widget)
+                item_check = QTableWidgetItem()
+                item_check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                item_check.setCheckState(Qt.Unchecked)
+                self.table.setItem(row, 0, item_check)
 
-            # 1. Type Icon
-            m_type = str(item.get("media_type", "")).lower()
-            icon_str = type_icons.get(m_type, "📁")
-            item_type = QTableWidgetItem(icon_str)
-            item_type.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 1, item_type)
+                # 1. Type Icon
+                m_type = str(item.get("media_type", "")).lower()
+                item_type = QTableWidgetItem(self.TYPE_ICONS.get(m_type, "📁"))
+                item_type.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 1, item_type)
 
-            # 2. File Name
-            item_name = QTableWidgetItem(fname)
-            item_name.setToolTip(fpath or fname)
-            item_name.setData(Qt.UserRole, (item, fpath, on_disk))
-            self.table.setItem(row, 2, item_name)
+                # 2. File Name
+                item_name = QTableWidgetItem(fname)
+                item_name.setToolTip(fpath or fname)
+                item_name.setData(Qt.UserRole, (item, fpath, on_disk))
+                self.table.setItem(row, 2, item_name)
 
-            # 3. Channel Name
-            item_chan = QTableWidgetItem(chan_name)
-            item_chan.setToolTip(f"Channel: {chan_name} (ID: {item.get('channel_id')})")
-            self.table.setItem(row, 3, item_chan)
+                # 3. Channel Name
+                item_chan = QTableWidgetItem(chan_name)
+                item_chan.setToolTip(f"Channel: {chan_name} (ID: {item.get('channel_id')})")
+                self.table.setItem(row, 3, item_chan)
 
-            # 4. Size
-            size_bytes = item.get("size") or (os.path.getsize(fpath) if (on_disk and fpath and os.path.exists(fpath)) else 0)
-            item_size = QTableWidgetItem(format_bytes(size_bytes))
-            item_size.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(row, 4, item_size)
+                # 4. Size
+                size_bytes = item.get("size") or (os.path.getsize(fpath) if (on_disk and fpath and os.path.exists(fpath)) else 0)
+                item_size = QTableWidgetItem(format_bytes(size_bytes))
+                item_size.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, 4, item_size)
 
-            # 5. Date
-            date_str = str(item.get("date") or "")[:10]
-            item_date = QTableWidgetItem(date_str)
-            item_date.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 5, item_date)
+                # 5. Date
+                item_date = QTableWidgetItem(str(item.get("date") or "")[:10])
+                item_date.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 5, item_date)
 
-            # 6. Status Badge
-            status_text = "🟢 On Disk" if on_disk else "🟡 Missing"
-            item_status = QTableWidgetItem(status_text)
-            item_status.setTextAlignment(Qt.AlignCenter)
-            if not on_disk:
-                item_status.setForeground(QColor("#F59E0B"))
-            else:
-                item_status.setForeground(QColor("#10B981"))
-            self.table.setItem(row, 6, item_status)
+                # 6. Status Badge
+                item_status = QTableWidgetItem("🟢 On Disk" if on_disk else "🟡 Missing")
+                item_status.setTextAlignment(Qt.AlignCenter)
+                item_status.setForeground(QColor("#10B981" if on_disk else "#F59E0B"))
+                self.table.setItem(row, 6, item_status)
+        finally:
+            self.table.blockSignals(False)
+            self.table.setUpdatesEnabled(True)
 
-            # 7. Action Buttons (Always visible & styled)
-            action_widget = QWidget()
-            act_layout = QHBoxLayout(action_widget)
-            act_layout.setContentsMargins(2, 2, 2, 2)
-            act_layout.setSpacing(4)
-
-            if on_disk:
-                btn_open = QPushButton("📂 Open")
-                btn_open.setObjectName("CardButtonCompact")
-                btn_open.setCursor(Qt.PointingHandCursor)
-                btn_open.setToolTip("Open this file")
-                btn_open.clicked.connect(lambda checked=False, p=fpath: self.open_file(p))
-                act_layout.addWidget(btn_open)
-
-                btn_folder = QPushButton("📁 Folder")
-                btn_folder.setObjectName("CardButtonCompact")
-                btn_folder.setCursor(Qt.PointingHandCursor)
-                btn_folder.setToolTip("Show file in folder")
-                btn_folder.clicked.connect(lambda checked=False, p=fpath: self.show_in_folder(p))
-                act_layout.addWidget(btn_folder)
-            else:
-                btn_re = QPushButton("🔄 Re-fetch")
-                btn_re.setObjectName("CardButtonCompact")
-                btn_re.setCursor(Qt.PointingHandCursor)
-                btn_re.setToolTip("Mark for re-download")
-                btn_re.clicked.connect(lambda checked=False, it=item: self.redownload_item(it))
-                act_layout.addWidget(btn_re)
-
-            btn_del = QPushButton("🗑")
-            btn_del.setObjectName("CardButtonCompact")
-            btn_del.setCursor(Qt.PointingHandCursor)
-            btn_del.setToolTip("Delete / Remove item")
-            btn_del.clicked.connect(lambda checked=False, it=item, p=fpath, od=on_disk: self.prompt_delete_item(it, p, od))
-            act_layout.addWidget(btn_del)
-
-            self.table.setCellWidget(row, 7, action_widget)
-
+        self._ensure_visible_actions()
         self.update_selected_count()
+
+    def _visible_row_range(self):
+        """First and last row index currently on screen (inclusive)."""
+        count = self.table.rowCount()
+        if count == 0:
+            return 0, -1
+        first = self.table.rowAt(0)
+        if first < 0:
+            first = 0
+        last = self.table.rowAt(self.table.viewport().height() - 1)
+        if last < 0:
+            last = count - 1
+        # Never build more than a screenful plus a small margin at once
+        return first, min(last + 2, first + 60, count - 1)
+
+    def _ensure_visible_actions(self, *_):
+        """Build the action buttons for the rows on screen that lack them."""
+        first, last = self._visible_row_range()
+        for row in range(first, last + 1):
+            if row < len(self._rows) and self.table.cellWidget(row, 7) is None:
+                self._build_action_widget(row)
+
+    def _build_action_widget(self, row):
+        item, _fname, _chan, fpath, on_disk = self._rows[row]
+        action_widget = QWidget()
+        act_layout = QHBoxLayout(action_widget)
+        act_layout.setContentsMargins(2, 2, 2, 2)
+        act_layout.setSpacing(4)
+
+        if on_disk:
+            btn_open = QPushButton("📂 Open")
+            btn_open.setObjectName("CardButtonCompact")
+            btn_open.setCursor(Qt.PointingHandCursor)
+            btn_open.setToolTip("Open this file")
+            btn_open.clicked.connect(lambda checked=False, p=fpath: self.open_file(p))
+            act_layout.addWidget(btn_open)
+
+            btn_folder = QPushButton("📁 Folder")
+            btn_folder.setObjectName("CardButtonCompact")
+            btn_folder.setCursor(Qt.PointingHandCursor)
+            btn_folder.setToolTip("Show file in folder")
+            btn_folder.clicked.connect(lambda checked=False, p=fpath: self.show_in_folder(p))
+            act_layout.addWidget(btn_folder)
+        else:
+            btn_re = QPushButton("🔄 Re-fetch")
+            btn_re.setObjectName("CardButtonCompact")
+            btn_re.setCursor(Qt.PointingHandCursor)
+            btn_re.setToolTip("Mark for re-download")
+            btn_re.clicked.connect(lambda checked=False, it=item: self.redownload_item(it))
+            act_layout.addWidget(btn_re)
+
+        btn_del = QPushButton("🗑")
+        btn_del.setObjectName("CardButtonCompact")
+        btn_del.setCursor(Qt.PointingHandCursor)
+        btn_del.setToolTip("Delete / Remove item")
+        btn_del.clicked.connect(lambda checked=False, it=item, p=fpath, od=on_disk: self.prompt_delete_item(it, p, od))
+        act_layout.addWidget(btn_del)
+
+        self.table.setCellWidget(row, 7, action_widget)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._ensure_visible_actions()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Row geometry is only final once the table has been laid out
+        QTimer.singleShot(0, self._ensure_visible_actions)
+
+    def _on_item_changed(self, table_item):
+        if table_item.column() == 0:
+            self.update_selected_count()
 
     def get_selected_rows_data(self):
         """Returns list of (item_dict, filepath, on_disk) for checked rows."""
         selected = []
         for row in range(self.table.rowCount()):
-            cell_widget = self.table.cellWidget(row, 0)
-            if cell_widget:
-                chk = cell_widget.findChild(QCheckBox)
-                if chk and chk.isChecked():
-                    name_item = self.table.item(row, 2)
-                    if name_item:
-                        data = name_item.data(Qt.UserRole)
-                        if data:
-                            selected.append(data)
+            check = self.table.item(row, 0)
+            if check is not None and check.checkState() == Qt.Checked:
+                name_item = self.table.item(row, 2)
+                data = name_item.data(Qt.UserRole) if name_item else None
+                if data:
+                    selected.append(data)
         return selected
 
     def toggle_select_all(self, state):
         checked = bool(state == Qt.Checked or state == 2)
-        for row in range(self.table.rowCount()):
-            cell_widget = self.table.cellWidget(row, 0)
-            if cell_widget:
-                chk = cell_widget.findChild(QCheckBox)
-                if chk:
-                    chk.setChecked(checked)
+        target = Qt.Checked if checked else Qt.Unchecked
+        # Count once at the end, not once per row (that was O(n^2))
+        self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                check = self.table.item(row, 0)
+                if check is not None:
+                    check.setCheckState(target)
+        finally:
+            self.table.blockSignals(False)
+        self.table.viewport().update()
         self.update_selected_count()
 
     def update_selected_count(self):
