@@ -42,7 +42,9 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.4
+- **Current Version**: 2.9.5
+- **Completed in v2.9.5**:
+  - [x] **cryptg Bundled**: Native AES instead of pure Python (~1000x faster per chunk); startup warning when missing; a test fails on a build machine without it.
 - **Completed in v2.9.4**:
   - [x] **Fast Files Tab**: Checkable items instead of per-row widgets, buttons only for visible rows, debounced search, single-pass Select All.
 - **Completed in v2.9.3**:

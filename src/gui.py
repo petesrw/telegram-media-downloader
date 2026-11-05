@@ -1,7 +1,7 @@
 import os
 import sys
 
-APP_VERSION = "2.9.4"
+APP_VERSION = "2.9.5"
 
 # We add src to path so absolute imports within src work cleanly
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +40,12 @@ def main():
     # -1. Initialize DB and Migrate Legacy Data
     init_db()
     migrate_json_to_db()
+
+    from core_downloader import crypto_backend_warning
+    from utils.app_logger import log_event
+    crypto_warning = crypto_backend_warning()
+    if crypto_warning:
+        log_event("WARNING", crypto_warning)
 
     from resource_utils import get_project_root
     env_path = os.path.join(get_project_root(), '.env')

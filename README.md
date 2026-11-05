@@ -161,6 +161,9 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.5
+- 🔐 **Fast Decryption (cryptg) Is Bundled Again**: The exe was built without `cryptg`, so Telethon decrypted every downloaded byte in pure Python. Each 512 KB chunk took ~950 ms of CPU, which capped downloads at ~500 KB/s. It also held Python's GIL so long that the window showed "Not Responding", most visibly on the Files tab. With cryptg the same chunk takes ~1 ms. The app now logs a warning at startup if cryptg is ever missing again.
+
 ### v2.9.4
 - 🚀 **Files Tab No Longer Hangs**: Every row of the downloaded-files list had its own checkbox widget and button widgets, so a history of ~1,850 files took over a second to build on every visit and every search keystroke, and **Select All** froze the app for ~18 seconds. Rows are now plain table items, buttons are built only for the rows on screen, search waits for typing to pause, and Select All counts once. Opening the tab takes ~0.3s and Select All is instant.
 

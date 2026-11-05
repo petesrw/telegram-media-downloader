@@ -35,6 +35,25 @@ DEFAULT_STALL_WARN_SECONDS = 45
 DEFAULT_STALL_ABORT_SECONDS = 180
 STALL_POLL_SECONDS = 5.0
 
+def crypto_backend_warning():
+    """Return a warning when Telethon must decrypt downloads in pure Python.
+
+    Without cryptg every byte is decrypted by Python code, which caps a
+    download at ~500 KB/s and holds the GIL so long that the UI freezes.
+    """
+    try:
+        import telethon.crypto.aes as telethon_aes
+    except Exception:
+        return None
+    if getattr(telethon_aes, "cryptg", None) is not None:
+        return None
+    return (
+        "cryptg is not installed - Telethon decrypts downloads in pure Python, "
+        "so downloads are slow (~500 KB/s) and the window may stop responding. "
+        "Install the pinned version from requirements.txt and rebuild."
+    )
+
+
 def _describe_media(message):
     """Short "media: <type>[, mime, size]" note for failures nobody can retry away."""
     media = getattr(message, 'media', None)
