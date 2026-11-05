@@ -61,6 +61,12 @@ def init_db():
         cursor.execute("ALTER TABLE tasks ADD COLUMN skipped_ids TEXT")
     except sqlite3.OperationalError:
         pass
+
+    # Migration: why each file failed, so the card can list them after a restart
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN failed_ids TEXT")
+    except sqlite3.OperationalError:
+        pass
     
     conn.commit()
     conn.close()
@@ -224,7 +230,7 @@ def _task_match_query(task_id_or_chan):
         clauses.append("channel_input LIKE ?")
         params.append(f"%{candidate}%")
 
-    return "SELECT task_id, skipped_ids FROM tasks WHERE " + " OR ".join(clauses), params
+    return "SELECT task_id, skipped_ids, failed_ids FROM tasks WHERE " + " OR ".join(clauses), params
 
 def add_task_skipped_id(task_id_or_chan, msg_id):
     """Persistently remember that the user removed one file from a task.
@@ -256,6 +262,81 @@ def add_task_skipped_id(task_id_or_chan, msg_id):
     conn.commit()
     conn.close()
     return updated
+
+def _parse_failures(raw):
+    """Parse the failed_ids column: a JSON object of message ID -> reason."""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    failures = {}
+    for key, reason in data.items():
+        try:
+            failures[int(key)] = str(reason)
+        except (TypeError, ValueError):
+            continue
+    return failures
+
+def _update_task_failures(task_id_or_chan, change):
+    """Apply `change(failures_dict)` to every matching task row.
+
+    Returns how many task rows were updated.
+    """
+    query, params = _task_match_query(task_id_or_chan)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+
+    updated = 0
+    for row in cursor.fetchall():
+        failures = _parse_failures(row["failed_ids"])
+        change(failures)
+        cursor.execute(
+            "UPDATE tasks SET failed_ids=? WHERE task_id=?",
+            (json.dumps({str(k): v for k, v in sorted(failures.items())}), row["task_id"]),
+        )
+        updated += 1
+    conn.commit()
+    conn.close()
+    return updated
+
+def record_task_failure(task_id_or_chan, msg_id, reason):
+    """Remember that a file of a task failed, and why, across restarts."""
+    try:
+        msg_id = int(msg_id)
+    except (TypeError, ValueError):
+        return 0
+    return _update_task_failures(
+        task_id_or_chan, lambda failures: failures.__setitem__(msg_id, str(reason))
+    )
+
+def clear_task_failure(task_id_or_chan, msg_id):
+    """Forget a failure once the file completed or the user removed it."""
+    try:
+        msg_id = int(msg_id)
+    except (TypeError, ValueError):
+        return 0
+    return _update_task_failures(
+        task_id_or_chan, lambda failures: failures.pop(msg_id, None)
+    )
+
+def load_task_failures(task_id_or_chan):
+    """Return {message ID: reason} for the files of a task that failed."""
+    query, params = _task_match_query(task_id_or_chan)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    failures = {}
+    for row in cursor.fetchall():
+        failures.update(_parse_failures(row["failed_ids"]))
+    conn.close()
+    return failures
 
 def load_task_skipped_ids(task_id_or_chan):
     """Return the set of message IDs the user removed from a task."""

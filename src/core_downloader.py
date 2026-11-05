@@ -546,6 +546,12 @@ async def download_single_file(client, channel, message, folder_name, progress_c
         if complete_cb:
             complete_cb(msg_id, paused=False, filepath=None, error=True, reason=reason)
 
+    if message is not None and getattr(message, "media", None) is None:
+        # The post no longer carries media (removed or edited away); no retry
+        # or fallback can download it, so say so instead of "no file".
+        fail(message.id, f"{DELETED_ON_TELEGRAM} - the media was removed from the post")
+        return
+
     max_retries = 3
     for attempt in range(max_retries):
         last_activity[0] = time.time()

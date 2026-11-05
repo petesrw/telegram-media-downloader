@@ -366,6 +366,15 @@ class DownloadCard(QWidget):
             lbl_more.setStyleSheet("padding: 8px; font-style: italic; color: #888;")
             self.files_layout.addWidget(lbl_more)
 
+        self._restore_saved_failures()
+
+    def _restore_saved_failures(self):
+        """Show failures recorded before a restart, so they can be removed."""
+        for meta in self.files_metadata:
+            reason = meta.get("failed_reason")
+            if reason and not meta.get("completed") and not meta.get("removed"):
+                self.mark_file_failed(meta["id"], reason)
+
     # ── per-file failure / stall reporting ──────────────────────────────
     def _on_row_remove_requested(self, msg_id):
         self.removeFileRequested.emit(self.task_id, msg_id)

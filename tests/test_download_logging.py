@@ -34,7 +34,8 @@ class MockMessage:
     def __init__(self, msg_id, size=100):
         self.id = msg_id
         self.size = size
-        self.media = None
+        # Telegram only returns media messages for a download; None means gone
+        self.media = "media"
         self.photo = None
         self.video = None
         self.document = None
@@ -470,10 +471,29 @@ class TestFailureReasons(unittest.TestCase):
 
         self.assertIn("media: MessageMediaDocument, video/mp4, 3.0 MB", results[0]["reason"])
 
-    def test_no_file_reason_says_when_there_is_no_media(self):
-        results = self._download_returning_nothing(None)
+    def test_a_message_without_media_is_labelled_gone_without_downloading(self):
+        # On 2026-11-04, 34 files failed with "media: none": their posts no
+        # longer carry media, so no retry can ever download them.
+        class NoMediaMessage(MockMessage):
+            async def download_media(self, file=None, progress_callback=None):
+                raise AssertionError("must not try to download a post without media")
 
-        self.assertIn("media: none", results[0]["reason"])
+        message = NoMediaMessage(9)
+        message.media = None
+        results = []
+
+        def complete_cb(msg_id, paused=False, filepath=None, error=False, reason=None):
+            results.append({"error": error, "reason": reason})
+
+        self._run(cd.download_single_file(
+            client=None, channel=object(), message=message,
+            folder_name=self.temp_dir, complete_cb=complete_cb,
+        ))
+
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["error"])
+        self.assertTrue(al.is_deleted_on_telegram(results[0]["reason"]))
+        self.assertIn("media was removed", results[0]["reason"])
 
     def test_batches_forward_the_skip_set_and_the_reason(self):
         attempted = []
@@ -602,7 +622,9 @@ class TestMediaGoneFromTelegram(unittest.TestCase):
         self.assertTrue(al.is_deleted_on_telegram(results[0]["reason"]))
 
     def test_message_without_media_fails_once_with_a_clear_reason(self):
-        calls, results = self._download(refetched=MockMessage(7))
+        refetched = MockMessage(7)
+        refetched.media = None
+        calls, results = self._download(refetched=refetched)
 
         self.assertEqual(calls, [7])
         self.assertEqual(len(results), 1)
@@ -954,6 +976,27 @@ class TestDeletedOnTelegramLabel(unittest.TestCase):
 
         self.assertTrue(card.btn_remove_failed.isHidden())
 
+    def test_failures_saved_before_a_restart_show_on_the_new_card(self):
+        from ui.components.download_card import DownloadCard
+
+        files = [
+            {"id": 1, "name": "a.mp4", "size": 10, "failed_reason": "Download produced no file"},
+            {"id": 2, "name": "b.mp4", "size": 10, "failed_reason": self._deleted_reason()},
+            {"id": 3, "name": "c.mp4", "size": 10},
+            # Completed or removed since it failed: not a failure any more
+            {"id": 4, "name": "d.mp4", "size": 10, "completed": True, "failed_reason": "x"},
+            {"id": 5, "name": "e.mp4", "size": 10, "removed": True, "failed_reason": "x"},
+        ]
+        card = DownloadCard("t1", "K.27.1", 5, "folder", "all", None, files_metadata=files)
+
+        self.assertFalse(card.btn_remove_failed.isHidden())
+        self.assertIn("(2)", card.btn_remove_failed.text())
+        self.assertEqual(card.file_rows[1].icon.text(), "❌")
+        self.assertEqual(card.file_rows[2].icon.text(), "🗑️")
+
+        card.refresh_from_metadata("K.27.1", 5, 1, files)
+        self.assertIn("(2)", card.btn_remove_failed.text())
+
     def test_real_failures_keep_the_failed_badge(self):
         card = self._card()
         card.mark_file_failed(1, "Network timeout - Telegram did not answer in time")
@@ -977,6 +1020,29 @@ class TestSkippedFilesPersistence(unittest.TestCase):
     def tearDown(self):
         database.DB_PATH = self.orig_db_path
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_failed_files_survive_a_restart(self):
+        database.save_task_db({"channel_input": "-100123", "media_id": 6, "total_items": 3})
+
+        database.record_task_failure("-100123_6", 7, "Download produced no file")
+        database.record_task_failure("-100123_6", 8, "Network timeout")
+        database.record_task_failure("-100123_6", 8, "Network timeout again")
+        self.assertEqual(
+            database.load_task_failures("-100123_6"),
+            {7: "Download produced no file", 8: "Network timeout again"},
+        )
+
+        # Re-saving the task (pause, resume, rename) must keep them
+        database.save_task_db(database.load_active_tasks_db()[0])
+        self.assertEqual(len(database.load_task_failures("-100123_6")), 2)
+
+        # A retry that succeeds, or the user removing it, clears the failure
+        database.clear_task_failure("-100123_6", 7)
+        self.assertEqual(database.load_task_failures("-100123_6"), {8: "Network timeout again"})
+
+    def test_failures_of_an_unknown_task_are_empty(self):
+        self.assertEqual(database.load_task_failures("-100999_6"), {})
+        self.assertEqual(database.record_task_failure("-100999_6", 1, "x"), 0)
 
     def test_skipped_ids_survive_a_save_and_load(self):
         database.save_task_db({

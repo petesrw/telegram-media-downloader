@@ -233,7 +233,7 @@ class TestBulkDownloader(unittest.TestCase):
         from telethon.tl.types import PeerChannel
 
         file_size = 5000
-        msg = MockMessage(id=101, video=MockDocument(size=file_size))
+        msg = MockMessage(id=101, media=True, video=MockDocument(size=file_size))
         
         # Create a .part file with exact file_size on disk
         part_file = os.path.join(self.temp_dir, f"Video_101.mp4.part")
@@ -266,7 +266,7 @@ class TestBulkDownloader(unittest.TestCase):
 
         channel = PeerChannel(channel_id=888999)
         c_id = str(get_peer_id(channel)).replace("-100", "", 1)
-        msg = MockMessage(id=202, video=MockDocument(size=10000))
+        msg = MockMessage(id=202, media=True, video=MockDocument(size=10000))
 
         # Assign initial db_filename
         update_media_downloaded_path(c_id, 202, "MyCustomVideo.mp4")
@@ -345,7 +345,7 @@ class TestBulkDownloader(unittest.TestCase):
             f.write("{}")
 
         file_size = len(b"FullVideoData")
-        msg = MockMessage(id=303, video=MockDocument(size=file_size))
+        msg = MockMessage(id=303, media=True, video=MockDocument(size=file_size))
         channel = PeerChannel(channel_id=555666)
 
         loop = asyncio.new_event_loop()
@@ -371,7 +371,7 @@ class TestBulkDownloader(unittest.TestCase):
         with open(part_file, "wb") as f:
             f.truncate(file_size)
 
-        msg = MockMessage(id=404, video=MockDocument(size=file_size))
+        msg = MockMessage(id=404, media=True, video=MockDocument(size=file_size))
         channel = PeerChannel(channel_id=777888)
 
         completed_files = []

@@ -42,7 +42,10 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.2
+- **Current Version**: 2.9.3
+- **Completed in v2.9.3**:
+  - [x] **Saved Failures**: Failed files and their reasons are stored with the task, so the Remove failed button shows them after a restart.
+  - [x] **No-Media Posts**: Messages without media fail immediately as "Deleted on Telegram" instead of "Download produced no file".
 - **Completed in v2.9.2**:
   - [x] **Resume After Restart**: Whole-category tasks reload without a selection instead of an empty one, so they no longer show "Completed" after reopening the app.
   - [x] **Fresh References Use The Parallel Engine**: An expired file reference is refreshed and retried in parallel instead of falling back to single-stream.

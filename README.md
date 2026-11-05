@@ -161,6 +161,10 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.3
+- 💾 **Failed Files Are Remembered After A Restart**: Failures used to live only on the open task card, so after reopening the app the **Remove failed (N)** button stayed hidden until each file failed again. Each failure and its reason are now saved with the task, and the card lists them as soon as it loads. A file that later downloads, or that you remove, is cleared from the list.
+- 🗑️ **Posts Without Media Are Labelled "Deleted on Telegram"**: A post whose media was removed failed with "Download produced no file (media: none)" after trying the slow fallback. It now fails at once with the grey "Deleted on Telegram" label, so it is clear that no retry can download it.
+
 ### v2.9.2
 - ▶️ **Unfinished Tasks Resume After A Restart**: A whole-category task that was still running when the app closed came back marked "Completed" without downloading the rest. Its "no selection" was saved as an empty selection, so the restart fetched zero messages. It now fetches the whole category again and continues.
 - ⚡ **Expired File References Stay On The Fast Engine**: Messages are fetched when a task starts, so files reached hours later all start with an expired file reference. The reference is now refreshed and the parallel engine runs again. Before, these files dropped to the much slower single-stream fallback, which cannot resume.

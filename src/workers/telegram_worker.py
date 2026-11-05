@@ -396,6 +396,12 @@ class TelegramWorker(QThread):
             except Exception as e:
                 log_event("WARNING", f"[{key}] could not persist removed file {msg_id}: {e}")
 
+            try:
+                from database import clear_task_failure
+                clear_task_failure(key, msg_id)
+            except Exception as e:
+                log_event("WARNING", f"[{key}] could not clear failure of removed file {msg_id}: {e}")
+
             log_event("INFO", f"[{key}] removed file {msg_id} from the queue by user request")
             return True
         except Exception as e:
@@ -482,6 +488,14 @@ class TelegramWorker(QThread):
                 skipped_ids.update(load_task_skipped_ids(task_id))
             except Exception as e:
                 log_event("WARNING", f"[{task_id}] could not load removed files: {e}")
+
+            # Failures from an earlier session, so the card lists them right away
+            saved_failures = {}
+            try:
+                from database import load_task_failures
+                saved_failures = load_task_failures(task_id)
+            except Exception as e:
+                log_event("WARNING", f"[{task_id}] could not load failed files: {e}")
             
             # 0. Load the downloaded state (Isolated by channel ID)
             resolved_peer_id = None
@@ -787,7 +801,8 @@ class TelegramWorker(QThread):
                     "name": fname,
                     "size": fsize,
                     "completed": msg.id in downloaded_state,
-                    "removed": msg.id in skipped_ids
+                    "removed": msg.id in skipped_ids,
+                    "failed_reason": saved_failures.get(msg.id),
                 })
 
             # Update the same card again with full file list
@@ -850,9 +865,19 @@ class TelegramWorker(QThread):
                     # Media Telegram no longer has is not an app error
                     level = "WARNING" if is_deleted_on_telegram(text) else "ERROR"
                     log_event(level, f"[{title}] file {msg_id} failed: {text}")
+                    try:
+                        from database import record_task_failure
+                        record_task_failure(task_id, msg_id, text)
+                    except Exception as e:
+                        log_event("WARNING", f"[{title}] could not save failure of file {msg_id}: {e}")
                     self.signals.file_failed.emit(task_id, msg_id, text)
                     return
                 if not paused:
+                    try:
+                        from database import clear_task_failure
+                        clear_task_failure(task_id, msg_id)
+                    except Exception as e:
+                        log_event("WARNING", f"[{title}] could not clear failure of file {msg_id}: {e}")
                     self.signals.file_completed.emit(task_id, msg_id)
                     completed_count[0] += 1
                     self.signals.download_progress.emit(task_id, completed_count[0], effective_total())
