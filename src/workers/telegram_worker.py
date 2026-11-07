@@ -269,9 +269,18 @@ class TelegramWorker(QThread):
                     selected_message_ids=ids,
                 )
 
+            def is_running(channel, media_id, topic_id):
+                from database import normalize_channel_key
+                key = normalize_channel_key(channel)
+                task_id = f"{key}_{topic_id}_{media_id}" if topic_id else f"{key}_{media_id}"
+                task = self.running_tasks.get(task_id)
+                return task is not None and not task.done()
+
             for sub in subs:
                 # Re-read tasks each time: an earlier subscription may have added one
-                await check_subscription(self.client, sub, load_active_tasks(), start)
+                await check_subscription(
+                    self.client, sub, load_active_tasks(), start, is_running=is_running
+                )
         except Exception as e:
             log_event("WARNING", f"subscription check failed: {e}")
         finally:

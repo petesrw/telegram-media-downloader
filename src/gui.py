@@ -1,7 +1,7 @@
 import os
 import sys
 
-APP_VERSION = "2.9.7"
+APP_VERSION = "2.9.8"
 
 # We add src to path so absolute imports within src work cleanly
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -36,6 +36,11 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception:
         pass
+
+    # -2. Native crashes (e.g. inside Qt) leave a Python stack trace in crash.log
+    from resource_utils import get_project_root
+    from utils.crash_log import enable_crash_log
+    enable_crash_log(os.path.join(get_project_root(), "crash.log"), APP_VERSION)
 
     # -1. Initialize DB and Migrate Legacy Data
     init_db()

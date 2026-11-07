@@ -156,14 +156,15 @@ class TestCheckSubscription(DbTestCase):
         })
         return database.list_subscriptions()[0]
 
-    def _check(self, client, active_tasks):
+    def _check(self, client, active_tasks, running=False):
         started = []
 
         def start_download(channel_input, media_id, download_path, selected_message_ids):
             started.append((channel_input, media_id, download_path, selected_message_ids))
 
         result = asyncio.run(subs.check_subscription(
-            client, self._current, active_tasks, start_download))
+            client, self._current, active_tasks, start_download,
+            is_running=lambda channel, media_id, topic_id: running))
         return result, started, database.list_subscriptions()[0]
 
     def test_new_posts_are_downloaded_and_the_checkpoint_moves(self):
@@ -207,6 +208,19 @@ class TestCheckSubscription(DbTestCase):
 
         self.assertEqual(started, [("-1003889572674", 6, "G:/youtube", [13, 14])])
         self.assertEqual(row["last_msg_id"], 14)
+
+    def test_a_downloading_task_is_never_restarted(self):
+        # Merging restarted the live task, cancelling its in-flight files on
+        # every check; each v2.9.7 crash followed such a restart.
+        self._current = self._sub(last_msg_id=13)
+        running = [{"channel_input": "-1003889572674", "media_id": 6, "topic_id": None,
+                    "selected_message_ids": [13]}]
+
+        result, started, row = self._check(FakeClient([13, 14]), running, running=True)
+
+        self.assertEqual(started, [])
+        self.assertEqual(result["action"], "defer")
+        self.assertEqual(row["last_msg_id"], 13, "post 14 must be found again next time")
 
     def test_a_task_of_another_category_is_left_alone(self):
         self._current = self._sub(last_msg_id=12, media_id=2)

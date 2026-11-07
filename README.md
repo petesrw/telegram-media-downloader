@@ -161,6 +161,10 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.8
+- 🛑 **Subscriptions No Longer Restart A Running Download**: When a check found new posts for a channel whose subscription task was still downloading, it restarted that task. Every in-flight file was cancelled (and logged as "paused by user") every few minutes. Each v2.9.7 crash came shortly after one of these restarts. New posts now wait until the running task finishes, and none are skipped.
+- 🧾 **Crash Log**: If the app ever dies from a native crash, the Python stack of every thread is written to `crash.log` next to `downloader.log`.
+
 ### v2.9.7
 - 🔔 **Subscribe To A Channel**: Enter a channel on Home and press **Subscribe**, then pick a media type. The app checks the channel every 5 minutes, and once at startup, and downloads posts published after you subscribed as an ordinary task in the Queue. The **Subscriptions** section in the Queue tab shows each channel and the result of its last check, and has **Check Now** and **Unsubscribe** buttons. A subscription never replaces a whole-category download of the same channel. New posts wait until that download finishes, and none are skipped. The interval is `subscription_interval_minutes` in `config.json`.
 

@@ -42,7 +42,10 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.7
+- **Current Version**: 2.9.8
+- **Completed in v2.9.8**:
+  - [x] **No Restart On Merge**: Subscription checks defer while the channel's task is running instead of restarting it.
+  - [x] **crash.log**: faulthandler dumps all thread stacks on native crashes (v2.9.7 crashed in pyside6.abi3.dll; root cause unconfirmed).
 - **Completed in v2.9.7**:
   - [x] **Subscribe Mode**: Watch channels for new posts (polling with `min_id` checkpoint), queue them as normal tasks, defer while a whole-category task of the same channel runs.
 - **Completed in v2.9.6**:

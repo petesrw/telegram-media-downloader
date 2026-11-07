@@ -104,12 +104,15 @@ def _now():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-async def check_subscription(client, sub, active_tasks, start_download):
+async def check_subscription(client, sub, active_tasks, start_download, is_running=None):
     """Queue the new posts of one subscription and record the result.
 
     `start_download(channel_input, media_id, download_path, selected_message_ids)`
-    starts or updates the download task. Errors are recorded on the
-    subscription instead of raised, so one broken channel does not stop the rest.
+    starts or updates the download task. `is_running(channel, media_id, topic_id)`
+    says whether that channel's task is downloading right now: start_download
+    restarts a running task, cancelling its in-flight files, so new posts wait
+    for it to finish instead. Errors are recorded on the subscription instead
+    of raised, so one broken channel does not stop the rest.
     """
     sub_id = sub["sub_id"]
     last_msg_id = int(sub.get("last_msg_id") or 0)
@@ -120,6 +123,8 @@ async def check_subscription(client, sub, active_tasks, start_download):
         entity = await fetch_channel(client, clean)
         new_ids = await find_new_message_ids(client, entity, media_id, last_msg_id, topic_id)
         action, ids = plan_batch(find_task(active_tasks, clean, media_id, topic_id), new_ids)
+        if action == "merge" and is_running and is_running(clean, media_id, topic_id):
+            action, ids = "defer", []
     except Exception as e:
         message = f"Check failed: {e}"
         database.update_subscription_check(sub_id, last_msg_id, _now(), message)
