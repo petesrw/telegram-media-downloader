@@ -39,12 +39,22 @@ class FakeDialog:
 class FakeClient:
     """Records ``get_entity`` calls and serves a fixed dialog list."""
 
-    def __init__(self, resolver, dialogs=(), archived_dialogs=(), me=None):
+    def __init__(self, resolver, dialogs=(), archived_dialogs=(), me=None, connected=True):
         self._resolver = resolver
         self.dialogs = list(dialogs)
         self.archived_dialogs = list(archived_dialogs)
         self.me = me
         self.calls = []
+        self.connected = connected
+        self.connects = 0
+        self.dialog_scans = 0
+
+    def is_connected(self):
+        return self.connected
+
+    async def connect(self):
+        self.connects += 1
+        self.connected = True
 
     async def get_me(self):
         return self.me
@@ -57,6 +67,7 @@ class FakeClient:
         return outcome
 
     def iter_dialogs(self, archived=False):
+        self.dialog_scans += 1
         source = self.archived_dialogs if archived else self.dialogs
 
         async def gen():
@@ -262,6 +273,48 @@ class TestFetchChannelResolution(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("Scanned 1 chat(s)", message)
         self.assertIn("invite link", message)
+
+    def test_a_definite_no_access_answer_skips_the_dialog_scan(self):
+        # Telegram itself said the account cannot see this channel, so scanning
+        # every chat cannot find it; done every 5 minutes by a subscription to a
+        # channel the account left, the scans add up to rate limits (HTTP 429).
+        from telethon.errors import ChannelPrivateError
+        client = FakeClient(
+            lambda value: ChannelPrivateError(request=None),
+            dialogs=[FakeDialog(types.PeerChat(7))],
+        )
+
+        with self.assertRaises(Exception) as ctx:
+            self._run(cd.fetch_channel(client, "-1003889572674"))
+
+        message = str(ctx.exception)
+        self.assertEqual(client.dialog_scans, 0)
+        self.assertNotIn("Scanned", message)
+        self.assertIn("No access to this channel", message)
+
+    def test_a_dropped_connection_is_reopened_before_the_lookup(self):
+        target = SimpleNamespace(id=4479181295, title="Channel", migrated_to=None)
+        client = FakeClient(lambda value: target, connected=False)
+
+        resolved = self._run(cd.fetch_channel(client, "-1004479181295"))
+
+        self.assertIs(resolved, target)
+        self.assertEqual(client.connects, 1)
+
+    def test_a_connection_failure_is_not_reported_as_refused_access(self):
+        client = FakeClient(
+            lambda value: ConnectionError("Cannot send requests while disconnected"),
+            dialogs=[FakeDialog(types.PeerChat(7))],
+        )
+
+        with self.assertRaises(Exception) as ctx:
+            self._run(cd.fetch_channel(client, "-4479181295"))
+
+        message = str(ctx.exception)
+        self.assertNotIn("refused access", message)
+        self.assertIn("Could not reach Telegram", message)
+        self.assertNotIn("Scanned", message)
+        self.assertEqual(client.dialog_scans, 0)
 
 
 if __name__ == "__main__":

@@ -161,6 +161,10 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.9
+- 🔌 **Reconnects After The Connection Drops**: After repeated network errors (for example a Telegram rate limit, HTTP 429) the connection stayed closed, and every fetch failed with "Cannot send requests while disconnected" until the app was restarted. Fetches, downloads and subscription checks now reopen the connection first. A connection failure is reported as "Could not reach Telegram", not as refused access.
+- 🚫 **No Chat Scan When Telegram Says No**: When Telegram answers that the account has no access to a channel (left, removed or banned), the app no longer scans every chat on the account looking for it. A subscription to such a channel made that scan every 5 minutes.
+
 ### v2.9.8
 - 🛑 **Subscriptions No Longer Restart A Running Download**: When a check found new posts for a channel whose subscription task was still downloading, it restarted that task. Every in-flight file was cancelled (and logged as "paused by user") every few minutes. Each v2.9.7 crash came shortly after one of these restarts. New posts now wait until the running task finishes, and none are skipped.
 - 🧾 **Crash Log**: If the app ever dies from a native crash, the Python stack of every thread is written to `crash.log` next to `downloader.log`.

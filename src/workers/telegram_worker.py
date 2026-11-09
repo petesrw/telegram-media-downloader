@@ -255,7 +255,11 @@ class TelegramWorker(QThread):
             subs = list_subscriptions()
             if not subs or self.client is None:
                 return
-            if not self.client.is_connected() or not await self.client.is_user_authorized():
+            from core_downloader import ensure_connected
+            # Reconnect instead of skipping: once Telethon gives up after
+            # network errors, nothing else would ever reopen the connection.
+            await ensure_connected(self.client)
+            if not await self.client.is_user_authorized():
                 return
             cfg = load_config()
 

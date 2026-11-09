@@ -392,12 +392,43 @@ async def _find_in_dialogs(client, candidate_ids):
     return None, scanned
 
 
+async def ensure_connected(client):
+    """Reopen the connection if Telethon gave up on it.
+
+    After repeated network errors (e.g. an HTTP 429) Telethon stops
+    reconnecting, and every later call fails with "Cannot send requests while
+    disconnected" until something calls connect() again.
+    """
+    if not client.is_connected():
+        log_event("WARNING", "Telegram connection was closed; reconnecting")
+        await client.connect()
+
+
+def _is_connection_error(exc):
+    return isinstance(exc, (ConnectionError, OSError, asyncio.TimeoutError))
+
+
+def _dialog_scan_can_help(errors):
+    """Whether scanning this account's chats could still find the entity.
+
+    The scan only helps when the lookup failed for lack of a cached access
+    hash. A definite "no access" answer from Telegram, or a broken
+    connection, means the scan cannot succeed and only costs requests.
+    """
+    for _value, err in errors:
+        if "ChannelPrivate" in type(err).__name__ or _is_connection_error(err):
+            continue
+        return True
+    return False
+
+
 async def fetch_channel(client, channel_input):
     """Fetch a channel by username or ID.
 
     Numeric IDs are ambiguous (users, basic groups and channels all use plain
     numbers), so every plausible interpretation is tried before failing.
     """
+    await ensure_connected(client)
     original_input = str(channel_input).strip()
     candidate_ids = _numeric_id_candidates(original_input)
     attempts = candidate_ids or [original_input]
@@ -426,7 +457,8 @@ async def fetch_channel(client, channel_input):
     # Telethon cannot resolve the bare ID from its session cache.
     entity = None
     scanned = 0
-    if candidate_ids:
+    scan_dialogs = bool(candidate_ids) and _dialog_scan_can_help(errors)
+    if scan_dialogs:
         print(f"Direct lookup for {original_input} failed. Searching through dialogs... this may take a moment.")
         try:
             entity, scanned = await _find_in_dialogs(client, candidate_ids)
@@ -446,7 +478,10 @@ async def fetch_channel(client, channel_input):
     primary = errors[0] if errors else (original_input, RuntimeError("Telegram returned no entity"))
     detail = describe_download_error(primary[1])
     raw_error = _clean_rpc_detail(primary[1])
-    error_msg = f"Telegram refused access to {original_input}."
+    if _is_connection_error(primary[1]):
+        error_msg = f"Could not reach Telegram to look up {original_input}."
+    else:
+        error_msg = f"Telegram refused access to {original_input}."
 
     # Name the account in use: a valid chat ID that resolves nowhere is usually
     # either the wrong account or a chat that account is not a member of.
@@ -475,7 +510,7 @@ async def fetch_channel(client, channel_input):
             for value, err in errors[1:]
         )
         error_msg += f"\n\nAlso tried: {also}"
-    if candidate_ids:
+    if scan_dialogs:
         error_msg += f"\n\nScanned {scanned} chat(s) on this account; none of these IDs matched."
     error_msg += (
         "\n\nTo fix this:\n"

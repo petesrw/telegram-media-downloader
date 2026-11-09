@@ -42,7 +42,10 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.8
+- **Current Version**: 2.9.9
+- **Completed in v2.9.9**:
+  - [x] **Reconnect**: `ensure_connected` reopens the client before lookups and subscription checks after Telethon gives up (seen after an HTTP 429).
+  - [x] **No Pointless Dialog Scan**: ChannelPrivateError or a connection error skips the full chat scan; connection failures say "Could not reach Telegram" instead of "refused access".
 - **Completed in v2.9.8**:
   - [x] **No Restart On Merge**: Subscription checks defer while the channel's task is running instead of restarting it.
   - [x] **crash.log**: faulthandler dumps all thread stacks on native crashes (v2.9.7 crashed in pyside6.abi3.dll; root cause unconfirmed).
