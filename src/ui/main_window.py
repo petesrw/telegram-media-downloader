@@ -485,6 +485,7 @@ class MainWindow(QMainWindow):
         self.worker.signals.file_stalled.connect(self.on_file_stalled)
         self.worker.signals.download_completed.connect(self.on_download_completed)
         self.worker.signals.error_occurred.connect(self.on_fetch_error)
+        self.worker.signals.task_unavailable.connect(self.on_task_unavailable)
         self.worker.signals.subscription_added.connect(self.on_subscription_added)
         self.worker.signals.subscription_failed.connect(self.on_subscription_failed)
         self.worker.signals.subscriptions_changed.connect(self.refresh_subscriptions)
@@ -620,21 +621,7 @@ class MainWindow(QMainWindow):
                 is_paused = bool(t.get("paused", True))
                 
                 if is_paused:
-                    ch_clean = str(chan).replace("-100", "", 1) if str(chan).startswith("-100") else str(chan)
-                    m_id = t.get('media_id', 6)
-                    topic = t.get('topic_id')
-                    task_key = f"{ch_clean}_{topic}_{m_id}" if topic else f"{ch_clean}_{m_id}"
-                    self.add_download_card({
-                        "task_id": task_key,
-                        "title": t.get("title") or f"Saved Task: {chan}",
-                        "is_paused": True,
-                        "download_path": t.get("download_path") or cfg.get("download_path", "downloads"),
-                        "download_limit": cfg_limit,
-                        "max_speed_kb": cfg_speed,
-                        "media_type": m_id,
-                        "completed": t.get("completed", 0),
-                        "folder_name": t.get("folder_name") or t.get("download_path", "downloads")
-                    }, t.get("total_items", 0))
+                    self._add_paused_task_card(t, cfg)
                 else:
                     # Stagger starts to avoid UI choking
                     def delayed_start(t_data=t):
@@ -658,6 +645,44 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
         
+    @staticmethod
+    def _saved_task_key(t):
+        chan = str(t.get("channel_input"))
+        ch_clean = chan.replace("-100", "", 1) if chan.startswith("-100") else chan
+        m_id = t.get("media_id", 6)
+        topic = t.get("topic_id")
+        return f"{ch_clean}_{topic}_{m_id}" if topic else f"{ch_clean}_{m_id}"
+
+    def _add_paused_task_card(self, t, cfg):
+        """Show a saved task as a paused card (not started)."""
+        m_id = t.get("media_id", 6)
+        self.add_download_card({
+            "task_id": self._saved_task_key(t),
+            "title": t.get("title") or f"Saved Task: {t.get('channel_input')}",
+            "is_paused": True,
+            "download_path": t.get("download_path") or cfg.get("download_path", "downloads"),
+            "download_limit": cfg.get("download_limit", 5),
+            "max_speed_kb": cfg.get("max_speed_kb", 0),
+            "media_type": m_id,
+            "completed": t.get("completed", 0),
+            "folder_name": t.get("folder_name") or t.get("download_path", "downloads")
+        }, t.get("total_items", 0))
+
+    def on_task_unavailable(self, task_id, _err_msg):
+        """The channel of a task can no longer be opened; the worker paused it.
+
+        A task resumed at startup has no card yet, so add a paused one: the
+        user can Remove it there, or Resume after rejoining the channel.
+        """
+        if task_id in self.card_widgets:
+            return
+        from core_downloader import load_active_tasks
+        from ui.views.settings_view import load_config
+        for t in load_active_tasks():
+            if isinstance(t, dict) and t.get("channel_input") and self._saved_task_key(t) == task_id:
+                self._add_paused_task_card(t, load_config())
+                return
+
     # ---------------------------------------------------------
     # Subscribe mode
     # ---------------------------------------------------------

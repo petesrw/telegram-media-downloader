@@ -392,6 +392,14 @@ async def _find_in_dialogs(client, candidate_ids):
     return None, scanned
 
 
+class ChannelUnavailableError(Exception):
+    """Telegram answered, and this account cannot open the channel.
+
+    Unlike a network failure, retrying will not help until the account
+    rejoins the channel or the input changes.
+    """
+
+
 async def ensure_connected(client):
     """Reopen the connection if Telethon gave up on it.
 
@@ -527,7 +535,9 @@ async def fetch_channel(client, channel_input):
             for value, err in errors
         ),
     )
-    raise Exception(error_msg) # Re-raise with the helpful tip
+    if _is_connection_error(primary[1]):
+        raise Exception(error_msg)
+    raise ChannelUnavailableError(error_msg)
 import time
 
 def get_unique_filepath(folder, filename, reserved_paths=None):

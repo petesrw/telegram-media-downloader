@@ -161,6 +161,9 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.10
+- 🅿️ **Tasks For A Channel You Left Stop Failing At Every Launch**: If the account can no longer open a task's channel (left, removed or banned), the task used to resume at every launch, fail with a Fetch Error, and had no card in the Queue to remove it from. It is now paused and shown as a card, so you can **Remove** it, or **Resume** it after rejoining the channel. Network failures still retry as before.
+
 ### v2.9.9
 - 🔌 **Reconnects After The Connection Drops**: After repeated network errors (for example a Telegram rate limit, HTTP 429) the connection stayed closed, and every fetch failed with "Cannot send requests while disconnected" until the app was restarted. Fetches, downloads and subscription checks now reopen the connection first. A connection failure is reported as "Could not reach Telegram", not as refused access.
 - 🚫 **No Chat Scan When Telegram Says No**: When Telegram answers that the account has no access to a channel (left, removed or banned), the app no longer scans every chat on the account looking for it. A subscription to such a channel made that scan every 5 minutes.

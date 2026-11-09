@@ -42,7 +42,9 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.9
+- **Current Version**: 2.9.10
+- **Completed in v2.9.10**:
+  - [x] **Park Unreachable Tasks**: `ChannelUnavailableError` from fetch_channel pauses the saved task and shows it as a card, instead of auto-resuming and failing on every launch.
 - **Completed in v2.9.9**:
   - [x] **Reconnect**: `ensure_connected` reopens the client before lookups and subscription checks after Telethon gives up (seen after an HTTP 429).
   - [x] **No Pointless Dialog Scan**: ChannelPrivateError or a connection error skips the full chat scan; connection failures say "Could not reach Telegram" instead of "refused access".

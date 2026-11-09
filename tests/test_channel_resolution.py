@@ -288,6 +288,7 @@ class TestFetchChannelResolution(unittest.TestCase):
             self._run(cd.fetch_channel(client, "-1003889572674"))
 
         message = str(ctx.exception)
+        self.assertIsInstance(ctx.exception, cd.ChannelUnavailableError)
         self.assertEqual(client.dialog_scans, 0)
         self.assertNotIn("Scanned", message)
         self.assertIn("No access to this channel", message)
@@ -311,6 +312,8 @@ class TestFetchChannelResolution(unittest.TestCase):
             self._run(cd.fetch_channel(client, "-4479181295"))
 
         message = str(ctx.exception)
+        self.assertNotIsInstance(ctx.exception, cd.ChannelUnavailableError,
+                                 "a network failure says nothing about access")
         self.assertNotIn("refused access", message)
         self.assertIn("Could not reach Telegram", message)
         self.assertNotIn("Scanned", message)

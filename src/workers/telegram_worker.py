@@ -14,7 +14,8 @@ from core_downloader import (
     download_in_batches_headless,
     load_active_tasks,
     save_active_tasks,
-    parse_channel_input
+    parse_channel_input,
+    ChannelUnavailableError,
 )
 from utils.file_utils import get_media_filename
 from resource_utils import get_project_root
@@ -38,6 +39,7 @@ class WorkerSignals(QObject):
     file_stalled = Signal(str, int, str) # task_id, msg_id, reason
     download_completed = Signal(str, str) # task_id, folder_name
     error_occurred = Signal(str, str) # task_id, error_msg
+    task_unavailable = Signal(str, str) # task_id, error_msg - channel can no longer be opened
 
     # Subscribe mode
     subscription_added = Signal(str)    # title / description
@@ -1000,4 +1002,9 @@ class TelegramWorker(QThread):
         except Exception as e:
             from utils.app_logger import describe_download_error
             log_event("ERROR", f"task {original_task_id or channel_input} aborted: {describe_download_error(e)} ({e})")
+            if isinstance(e, ChannelUnavailableError) and original_task_id:
+                # Retrying cannot help, so park the task as paused: it shows as a
+                # card the user can Remove, instead of failing on every launch.
+                self.pause_download(original_task_id)
+                self.signals.task_unavailable.emit(original_task_id, str(e))
             self.signals.error_occurred.emit(channel_input, str(e))
