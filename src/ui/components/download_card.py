@@ -10,6 +10,19 @@ from utils.app_logger import DELETED_ON_TELEGRAM, is_deleted_on_telegram
 # Styles are now moved to dark_style.qss and style.qss
 
 
+def _discard_widget(layout, widget):
+    """Take a widget out of a layout and let Qt delete it on the GUI thread.
+
+    Never ``setParent(None)`` first: that turns the widget into an orphan
+    top-level window until deleteLater runs. With that teardown a stress run
+    reproduced the v2.9.7-v2.9.10 access violation in pyside6.abi3.dll (2 of 4
+    runs, same stack as crash.log); keeping the parent gave 0 of 6.
+    """
+    layout.removeWidget(widget)
+    widget.hide()
+    widget.deleteLater()
+
+
 class DownloadCard(QWidget):
     def __init__(self, task_id, title, total_items, folder_name, media_type, parent_worker,
                  completed=0, is_paused=False, download_path="downloads", download_limit=5,
@@ -311,7 +324,7 @@ class DownloadCard(QWidget):
         for i in reversed(range(self.files_layout.count())):
             w = self.files_layout.itemAt(i).widget()
             if w:
-                w.setParent(None); w.deleteLater()
+                _discard_widget(self.files_layout, w)
         self.file_rows.clear()
         self.populate_files()
 
@@ -441,8 +454,7 @@ class DownloadCard(QWidget):
         """Drop one file from this card and adjust the counters accordingly."""
         row = self.file_rows.pop(msg_id, None)
         if row:
-            row.setParent(None)
-            row.deleteLater()
+            _discard_widget(self.files_layout, row)
 
         self.files_metadata = [m for m in self.files_metadata if m.get("id") != msg_id]
         self.lbl_reason.setVisible(False)
@@ -708,13 +720,16 @@ class FileRow(QWidget):
         )
         self.btn_remove.setFixedSize(20, 20)
         self.btn_remove.setCursor(Qt.PointingHandCursor)
-        self.btn_remove.clicked.connect(lambda: self.removeRequested.emit(self.msg_id))
+        self.btn_remove.clicked.connect(self._request_remove)
 
         layout.addWidget(self.icon)
         layout.addLayout(text_col, stretch=3)
         layout.addWidget(self.lbl_size)
         layout.addWidget(self.bar)
         layout.addWidget(self.btn_remove)
+
+    def _request_remove(self):
+        self.removeRequested.emit(self.msg_id)
 
     def _set_reason(self, text, color="#EF4444"):
         self.lbl_reason.setText(text)

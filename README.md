@@ -161,6 +161,10 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.11
+- 💥 **Fixed The App Disappearing While Left Open**: The app could crash (access violation in `pyside6.abi3.dll`) while a download card rebuilt its file list. Removed rows were detached from the card before Qt deleted them. They now stay attached until deleted. A stress test reproduced the crash with the old code in 2 of 4 runs and never in 6 runs with the fix.
+- 🔁 **Subscriptions Stop Re-downloading Finished Posts**: Each time a subscription found new posts, it queued the task's whole earlier selection again, including posts already downloaded or deleted on Telegram. Those failed again and the card was rebuilt every few minutes. Only new and still-pending posts are queued now.
+
 ### v2.9.10
 - 🅿️ **Tasks For A Channel You Left Stop Failing At Every Launch**: If the account can no longer open a task's channel (left, removed or banned), the task used to resume at every launch, fail with a Fetch Error, and had no card in the Queue to remove it from. It is now paused and shown as a card, so you can **Remove** it, or **Resume** it after rejoining the channel. Network failures still retry as before.
 

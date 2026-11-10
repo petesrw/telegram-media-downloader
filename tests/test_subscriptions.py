@@ -119,6 +119,12 @@ class TestPlanBatch(unittest.TestCase):
         task = {"selected_message_ids": [3, 5]}
         self.assertEqual(subs.plan_batch(task, [5]), ("none", []))
 
+    def test_settled_posts_are_not_queued_again(self):
+        # Completed or deleted posts re-queued on every check made each check
+        # re-fail them and rebuild the card; each v2.9.10 crash followed that.
+        task = {"selected_message_ids": [1, 2, 3]}
+        self.assertEqual(subs.plan_batch(task, [5], settled_ids={1, 2}), ("merge", [3, 5]))
+
     def test_a_whole_category_task_is_never_replaced(self):
         # start_download would overwrite its "everything" with just the new posts
         for selection in (None, []):
@@ -221,6 +227,20 @@ class TestCheckSubscription(DbTestCase):
         self.assertEqual(started, [])
         self.assertEqual(result["action"], "defer")
         self.assertEqual(row["last_msg_id"], 13, "post 14 must be found again next time")
+
+    def test_finished_and_deleted_posts_of_a_stopped_task_are_not_restarted(self):
+        self._current = self._sub(last_msg_id=12)
+        database.save_task_db({"channel_input": "-1003889572674", "media_id": 6,
+                               "selected_message_ids": [10, 11, 12], "title": "K.27.1"})
+        database.mark_media_completed("-1003889572674", 10)
+        database.record_task_failure("3889572674_6", 11, "Deleted on Telegram - the media was removed")
+        stopped = [{"channel_input": "-1003889572674", "media_id": 6, "topic_id": None,
+                    "selected_message_ids": [10, 11, 12]}]
+
+        result, started, row = self._check(FakeClient([10, 11, 12, 13, 14]), stopped)
+
+        self.assertEqual(started, [("-1003889572674", 6, "G:/youtube", [12, 13, 14])])
+        self.assertEqual(row["last_msg_id"], 14)
 
     def test_a_task_of_another_category_is_left_alone(self):
         self._current = self._sub(last_msg_id=12, media_id=2)

@@ -12,7 +12,7 @@ from telethon.utils import get_peer_id
 
 import database
 from core_downloader import fetch_channel, get_messages_by_type, parse_channel_input
-from utils.app_logger import log_event
+from utils.app_logger import log_event, is_deleted_on_telegram
 
 MEDIA_LABELS = {
     1: "Images",
@@ -24,14 +24,16 @@ MEDIA_LABELS = {
 }
 
 
-def plan_batch(existing_task, new_ids):
+def plan_batch(existing_task, new_ids, settled_ids=()):
     """Decide how new posts reach a download task.
 
     Returns (action, message_ids):
       "none"  - nothing to queue
       "start" - start a task with these posts
       "merge" - the channel already has a task with a file selection; queue
-                the union so earlier posts keep downloading
+                the new posts plus its earlier posts that are not settled
+                (completed or deleted on Telegram), so those are not
+                downloaded or failed again on every check
       "defer" - a whole-category task is running; starting a task now would
                 replace its "everything" with just the new posts, so wait
     """
@@ -46,7 +48,8 @@ def plan_batch(existing_task, new_ids):
     queued = set(selection)
     if queued.issuperset(new_ids):
         return "none", []
-    return "merge", sorted(queued | set(new_ids))
+    pending = queued - set(settled_ids)
+    return "merge", sorted(pending | set(new_ids))
 
 
 def find_task(active_tasks, channel_input, media_id, topic_id):
@@ -68,6 +71,21 @@ async def find_new_message_ids(client, channel, media_id, after_id, topic_id=Non
         client, channel, media_id, min_id=after_id or None, limit=None, topic_id=topic_id
     )
     return sorted(m.id for m in messages if m.id > (after_id or 0))
+
+
+def settled_message_ids(channel_input, media_id, topic_id=None):
+    """Posts of a task that need no further download: completed, or deleted on Telegram."""
+    key = database.normalize_channel_key(channel_input)
+    task_id = f"{key}_{topic_id}_{media_id}" if topic_id else f"{key}_{media_id}"
+    deleted = {
+        msg_id for msg_id, reason in database.load_task_failures(task_id).items()
+        if is_deleted_on_telegram(reason)
+    }
+    completed = {
+        int(msg_id) for channel_id, msg_id in database.get_completed_state_db()
+        if database.normalize_channel_key(str(channel_id)) == key
+    }
+    return deleted | completed
 
 
 def _channel_title(entity, fallback):
@@ -122,7 +140,9 @@ async def check_subscription(client, sub, active_tasks, start_download, is_runni
         clean, topic_id = parse_channel_input(sub["channel_input"])
         entity = await fetch_channel(client, clean)
         new_ids = await find_new_message_ids(client, entity, media_id, last_msg_id, topic_id)
-        action, ids = plan_batch(find_task(active_tasks, clean, media_id, topic_id), new_ids)
+        existing = find_task(active_tasks, clean, media_id, topic_id)
+        settled = settled_message_ids(clean, media_id, topic_id) if existing else set()
+        action, ids = plan_batch(existing, new_ids, settled)
         if action == "merge" and is_running and is_running(clean, media_id, topic_id):
             action, ids = "defer", []
     except Exception as e:

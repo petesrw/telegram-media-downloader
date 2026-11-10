@@ -240,8 +240,9 @@ class DownloadsView(QWidget):
     def set_subscriptions(self, subscriptions):
         """Show the watched channels; the section hides when there are none."""
         for row in self.subscription_rows.values():
+            # Keep the parent: see download_card._discard_widget
             self.subscriptions_layout.removeWidget(row)
-            row.setParent(None)
+            row.hide()
             row.deleteLater()
         self.subscription_rows = {}
         for sub in subscriptions:
