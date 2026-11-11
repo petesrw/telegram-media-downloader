@@ -161,6 +161,10 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 ## Changelog
 
+### v2.9.12
+- 📏 **Correct Progress For Files Over 2 GB**: The per-file progress signal carried byte counts as 32-bit numbers. Past 2 GB they wrapped to negative values, the progress bar showed nonsense, and every update logged an `OverflowError` (over 13,000 of them in `crash_report.log`). Byte counts are now 64-bit.
+- 🧾 **crash.log Records A Clean Exit**: A normal quit now appends an "exited normally" line. If the app disappears and `crash.log` has neither a stack trace nor that line, something outside the app ended it (for example a display driver reset or Task Manager).
+
 ### v2.9.11
 - 💥 **Fixed The App Disappearing While Left Open**: The app could crash (access violation in `pyside6.abi3.dll`) while a download card rebuilt its file list. Removed rows were detached from the card before Qt deleted them. They now stay attached until deleted. A stress test reproduced the crash with the old code in 2 of 4 runs and never in 6 runs with the fix.
 - 🔁 **Subscriptions Stop Re-downloading Finished Posts**: Each time a subscription found new posts, it queued the task's whole earlier selection again, including posts already downloaded or deleted on Telegram. Those failed again and the card was rebuilt every few minutes. Only new and still-pending posts are queued now.

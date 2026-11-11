@@ -33,7 +33,8 @@ class WorkerSignals(QObject):
     media_list_fetched = Signal(str, object, object) # channel_input, channel_obj, messages_dict
     channel_fetched = Signal(object, int) # channel, total_messages
     download_progress = Signal(str, int, int) # task_id, current_items, total_items
-    file_progress = Signal(str, int, int, int, str) # task_id, msg_id, current_bytes, total_bytes, speed_str
+    # Byte counts are 64-bit: a C++ int wraps negative past 2 GiB (v2.9.12)
+    file_progress = Signal(str, int, "qlonglong", "qlonglong", str) # task_id, msg_id, current_bytes, total_bytes, speed_str
     file_completed = Signal(str, int) # task_id, msg_id
     file_failed = Signal(str, int, str) # task_id, msg_id, reason
     file_stalled = Signal(str, int, str) # task_id, msg_id, reason

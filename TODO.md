@@ -42,7 +42,10 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
 
 ## ✅ Roadmap
 
-- **Current Version**: 2.9.11
+- **Current Version**: 2.9.12
+- **Completed in v2.9.12**:
+  - [x] **64-bit Byte Progress**: `file_progress` uses `qlonglong` for current/total bytes; files over 2 GiB no longer wrap negative or flood crash_report.log with OverflowError.
+  - [x] **Clean-Exit Marker**: crash.log gets "exited normally" via atexit, so a silent disappearance can be told apart from a quit.
 - **Completed in v2.9.11**:
   - [x] **Card Row Teardown**: rows are removed with removeWidget + hide + deleteLater, never setParent(None). Stress repro of the pyside6.abi3.dll crash: 2/4 before, 0/6 after.
   - [x] **Subscriptions Skip Settled Posts**: merges no longer re-queue completed or deleted-on-Telegram posts, which restarted the task and rebuilt the card every 5 minutes.

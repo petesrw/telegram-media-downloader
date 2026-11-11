@@ -38,6 +38,35 @@ class TestCrashLog(unittest.TestCase):
             self.assertIn("Fatal Python error", text)
             self.assertIn("crashing_function", text)
 
+    def _run_child(self, path, ending):
+        script = textwrap.dedent(f"""
+            import sys, os
+            sys.path.insert(0, {SRC!r})
+            from utils.crash_log import enable_crash_log
+            enable_crash_log({path!r}, "9.9.9")
+        """) + ending
+        return subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=60)
+
+    def test_a_normal_exit_is_recorded(self):
+        # v2.9.11 vanished with no crash trace; without an exit line nobody could
+        # tell a clean quit from the process being killed from outside.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "crash.log")
+            proc = self._run_child(path, "sys.exit(0)\n")
+            self.assertEqual(proc.returncode, 0)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("exited normally", text)
+
+    def test_a_killed_process_leaves_no_exit_line(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "crash.log")
+            self._run_child(path, "os._exit(1)\n")  # like TerminateProcess: no cleanup runs
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("9.9.9", text)
+            self.assertNotIn("exited normally", text)
+
     def test_the_log_is_appended_not_replaced(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "crash.log")
